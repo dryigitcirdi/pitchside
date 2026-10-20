@@ -1,0 +1,96 @@
+/* PITCHSIDE — shared design tokens */
+:root {
+  --bg: #f6f6f4;
+  --bg-2: #efefec;
+  --surface: #ffffff;
+  --surface-2: #fbfbfa;
+  --glass: rgba(255, 255, 255, 0.62);
+  --glass-strong: rgba(255, 255, 255, 0.82);
+  --ink: #0a0a0b;
+  --ink-2: #2b2b2e;
+  --ink-3: #5c5c62;
+  --muted: #8a8a91;
+  --line: rgba(10, 10, 11, 0.07);
+  --line-2: rgba(10, 10, 11, 0.12);
+  --blue: #2563ff;
+  --blue-2: #5b8cff;
+  --blue-soft: rgba(37, 99, 255, 0.1);
+  --ice: #e6efff;
+  --ice-2: #cfe0ff;
+  --silver: linear-gradient(135deg, #f3f4f6 0%, #c9cdd4 45%, #eef0f3 60%, #aeb3bc 100%);
+  --silver-solid: #b8bdc6;
+  --out: #e5484d;
+  --limited: #f0a33a;
+  --ok: var(--blue);
+  --body-fill: #eceef1;
+  --body-stroke: rgba(10, 10, 11, 0.1);
+  --shadow-sm: 0 1px 2px rgba(10, 10, 11, 0.04), 0 1px 1px rgba(10, 10, 11, 0.03);
+  --shadow: 0 1px 2px rgba(10, 10, 11, 0.04), 0 8px 24px -8px rgba(10, 10, 11, 0.08);
+  --shadow-lg: 0 2px 4px rgba(10, 10, 11, 0.04), 0 24px 64px -16px rgba(10, 10, 11, 0.16);
+  --radius: 20px;
+  --radius-sm: 12px;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --font: "Geist", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #09090a; --bg-2: #0f0f11; --surface: #131315; --surface-2: #17171a;
+    --glass: rgba(22, 22, 25, 0.6); --glass-strong: rgba(22, 22, 25, 0.84);
+    --ink: #f5f5f7; --ink-2: #d9d9de; --ink-3: #a1a1a8; --muted: #6e6e76;
+    --line: rgba(255, 255, 255, 0.07); --line-2: rgba(255, 255, 255, 0.12);
+    --blue: #4d7fff; --blue-2: #7aa0ff; --blue-soft: rgba(77, 127, 255, 0.14);
+    --ice: rgba(77, 127, 255, 0.12); --ice-2: rgba(77, 127, 255, 0.24);
+    --silver: linear-gradient(135deg, #3a3d44 0%, #202227 45%, #3b3e45 60%, #1a1b1f 100%);
+    --silver-solid: #5a5f69;
+    --body-fill: #1e1f23; --body-stroke: rgba(255, 255, 255, 0.08);
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -8px rgba(0,0,0,.6);
+    --shadow-lg: 0 2px 4px rgba(0,0,0,.4), 0 24px 64px -16px rgba(0,0,0,.8);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #09090a; --bg-2: #0f0f11; --surface: #131315; --surface-2: #17171a;
+  --glass: rgba(22, 22, 25, 0.6); --glass-strong: rgba(22, 22, 25, 0.84);
+  --ink: #f5f5f7; --ink-2: #d9d9de; --ink-3: #a1a1a8; --muted: #6e6e76;
+  --line: rgba(255, 255, 255, 0.07); --line-2: rgba(255, 255, 255, 0.12);
+  --blue: #4d7fff; --blue-2: #7aa0ff; --blue-soft: rgba(77, 127, 255, 0.14);
+  --ice: rgba(77, 127, 255, 0.12); --ice-2: rgba(77, 127, 255, 0.24);
+  --silver: linear-gradient(135deg, #3a3d44 0%, #202227 45%, #3b3e45 60%, #1a1b1f 100%);
+  --silver-solid: #5a5f69;
+  --body-fill: #1e1f23; --body-stroke: rgba(255, 255, 255, 0.08);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.4);
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -8px rgba(0,0,0,.6);
+  --shadow-lg: 0 2px 4px rgba(0,0,0,.4), 0 24px 64px -16px rgba(0,0,0,.8);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.5;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "ss01", "cv11";
+}
+button, input, select, textarea { font: inherit; color: inherit; letter-spacing: inherit; }
+button { cursor: pointer; background: none; border: 0; padding: 0; }
+a { color: inherit; text-decoration: none; }
+::selection { background: var(--blue); color: #fff; }
+.mono { font-family: var(--mono); font-feature-settings: "zero"; letter-spacing: 0; }
+.tnum { font-variant-numeric: tabular-nums; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.001ms !important; transition-duration: 0.001ms !important; }
+}
