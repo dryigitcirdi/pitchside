@@ -194,7 +194,8 @@
         <button class="btn btn-primary btn-lg" style="align-self:flex-end">Devam ${I.arrow}</button>`;
       return `<label class="field"><span>Kişisel kodun</span><input class="input mono" name="code" autocomplete="off" placeholder="ör. DOG7" required></label><button class="btn btn-primary btn-lg" style="align-self:flex-end">Devam ${I.arrow}</button>`;
     }
-    return `<label class="field"><span>${ROLES[r].label} PIN</span><input class="input mono" type="password" name="pin" inputmode="numeric" autocomplete="current-password" placeholder="${demo ? "Demo: boş bırakılabilir" : "••••"}" ${demo ? "" : "required"}></label>
+    const optional = demo || r === "doctor";
+    return `<label class="field"><span>${ROLES[r].label} PIN</span><input class="input mono" type="password" name="pin" inputmode="numeric" autocomplete="current-password" placeholder="${demo ? "Demo: boş bırakılabilir" : r === "doctor" ? "PIN tanımlıysa yaz" : "••••"}" ${optional ? "" : "required"}></label>
       <button class="btn btn-primary btn-lg" style="align-self:flex-end">Giriş ${I.arrow}</button>
       <label class="remember"><input type="checkbox" name="remember" checked><span>Bu cihazı ${REMEMBER_DAYS} gün hatırla</span></label>`;
   }
@@ -267,7 +268,8 @@
         </header>
         <main class="page" id="page"></main>
       </div></div>
-      ${!Store.live ? `<div class="demo-bar"><span>Demo verisi</span><button class="btn btn-ghost" data-act="reset">Sıfırla</button></div>` : ""}`;
+      ${!Store.live ? `<div class="demo-bar"><span>Demo verisi</span><button class="btn btn-ghost" data-act="reset">Sıfırla</button></div>` : ""}
+      ${Store.live && r === "doctor" && Store.db.meta?.openDoctor ? `<div class="open-bar">${I.lock}<span><b>Hekim PIN'i tanımlı değil.</b> Bu adresi bilen herkes hekim olarak girebilir. Kadro ve sakatlık girmeden önce e-tabloda <b>Pitchside ▸ PIN'leri ayarla</b>.</span></div>` : ""}`;
     const h = location.hash.slice(1);
     go(r === "athlete" ? "me" : (h && TITLES[h] && nav.some((n) => n[0] === h) ? h : HOME[r]), true);
   }

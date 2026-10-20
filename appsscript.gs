@@ -19,7 +19,7 @@
  *  - QR raportörü (QR Kodları sekmesindeki anahtar): yalnızca aktif oyunculardan birinin adına YENİ bildirim açar
  *    (en fazla 14 gün geriye). Hiçbir veriyi okuyamaz; kayıt "Bildirildi" olarak düşer ve değerlendirilene kadar
  *    istatistiklere girmez. Aktif = Hayır ya da Bitiş tarihi geçmişse anahtar çalışmaz.
- *  - Hekim (PIN): tam yetki. "Bu cihazı hatırla": sunucu 30 günlük imzalı oturum verir; PIN değişirse geçersizleşir.
+ *  - Hekim (PIN; DOCTOR_PIN tanımlı değilse geçici olarak PIN'siz): tam yetki. "Bu cihazı hatırla": sunucu 30 günlük imzalı oturum verir; PIN değişirse geçersizleşir.
  */
 
 const TAB = {
@@ -286,12 +286,15 @@ function authenticate(req) {
   if (fails >= 30) return "locked";
   const props = PropertiesService.getScriptProperties(), s = readSettings();
   let who = null;
+  // Geçiş dönemi: DOCTOR_PIN tanımlı değilse hekim girişi PIN'siz açıktır. PIN menüden belirlendiği an zorunlu olur
+  // ve PIN'siz verilmiş "hatırla" oturumları da geçersizleşir (imza PIN'i içerir). Fizyo / teknik ekip her zaman PIN ister.
+  const open = req.role === "doctor" && !props.getProperty("DOCTOR_PIN");
   if (PIN_KEY[req.role] && req.sess) {
-    const parts = String(req.sess).split("."), pin = props.getProperty(PIN_KEY[req.role]);
-    if (parts.length === 3 && parts[0] === req.role && Number(parts[1]) > Date.now() && pin && signSession(parts[0], parts[1], pin) === parts[2]) who = { role: req.role, name: staffName(req.role, s) };
-  } else if (PIN_KEY[req.role] && req.pin) {
+    const parts = String(req.sess).split("."), pin = props.getProperty(PIN_KEY[req.role]) || (open ? "" : null);
+    if (parts.length === 3 && parts[0] === req.role && Number(parts[1]) > Date.now() && pin !== null && signSession(parts[0], parts[1], pin) === parts[2]) who = { role: req.role, name: staffName(req.role, s) };
+  } else if (PIN_KEY[req.role] && (req.pin || open)) {
     const pin = props.getProperty(PIN_KEY[req.role]);
-    if (pin && String(req.pin) === pin) who = { role: req.role, name: staffName(req.role, s), viaPin: true };
+    if (pin ? String(req.pin) === pin : open) who = { role: req.role, name: staffName(req.role, s), viaPin: true };
   } else if (req.role === "reporter" && req.token) {
     const tk = String(req.token).trim().toUpperCase(), today = todayISO();
     const t = readTokens().filter((x) => x.active && x.token && x.token.toUpperCase() === tk && (!x.expires || x.expires >= today))[0];
@@ -316,7 +319,7 @@ function signSession(role, exp, pin) {
   return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(role + "." + exp + "." + pin, sessionSecret())).replace(/=+$/, "");
 }
 function makeSession(role) {
-  const pin = PropertiesService.getScriptProperties().getProperty(PIN_KEY[role]), exp = String(Date.now() + SESSION_DAYS * 864e5);
+  const pin = PropertiesService.getScriptProperties().getProperty(PIN_KEY[role]) || "", exp = String(Date.now() + SESSION_DAYS * 864e5);
   return role + "." + exp + "." + signSession(role, exp, pin);
 }
 
@@ -348,7 +351,8 @@ function getData(who) {
   return {
     v: 2, players: players, injuries: injuries, exposure: who.role === "coach" ? [] : readExposure(), seasons: readSeasons(),
     matches: readMatches(), appearances: appearances, tokens: who.role === "doctor" ? readTokens() : [],
-    meta: { team: s["Takım adı"] || "", doctorName: staffName("doctor", s), physioName: staffName("physio", s), coachName: staffName("coach", s) },
+    meta: { team: s["Takım adı"] || "", doctorName: staffName("doctor", s), physioName: staffName("physio", s), coachName: staffName("coach", s),
+      openDoctor: who.role === "doctor" && !PropertiesService.getScriptProperties().getProperty("DOCTOR_PIN") },
   };
 }
 
