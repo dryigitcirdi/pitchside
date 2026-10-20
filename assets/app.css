@@ -642,3 +642,7 @@ table.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size
 :root[data-theme="dark"] .open-bar { color: #ffd9a8; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .open-bar { color: #ffd9a8; } }
 @media (max-width: 820px) { .open-bar { bottom: 84px; } }
+.pin-st { font-style: normal; font-size: 11px; margin-left: 6px; padding: 1px 8px; border-radius: 99px; background: color-mix(in srgb, var(--out) 14%, transparent); color: var(--out); }
+.pin-st.on { background: var(--blue-soft); color: var(--blue); }
+.open-bar a { color: inherit; text-decoration: underline; font-weight: 600; }
+.gate-note { font-size: 13px; color: var(--ink-3); }

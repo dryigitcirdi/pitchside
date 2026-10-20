@@ -194,8 +194,12 @@
         <button class="btn btn-primary btn-lg" style="align-self:flex-end">Devam ${I.arrow}</button>`;
       return `<label class="field"><span>Kişisel kodun</span><input class="input mono" name="code" autocomplete="off" placeholder="ör. DOG7" required></label><button class="btn btn-primary btn-lg" style="align-self:flex-end">Devam ${I.arrow}</button>`;
     }
-    const optional = demo || r === "doctor";
-    return `<label class="field"><span>${ROLES[r].label} PIN</span><input class="input mono" type="password" name="pin" inputmode="numeric" autocomplete="current-password" placeholder="${demo ? "Demo: boş bırakılabilir" : r === "doctor" ? "PIN tanımlıysa yaz" : "••••"}" ${optional ? "" : "required"}></label>
+    // No PIN field at all where none applies: demo mode, or a doctor before any doctor PIN is set.
+    const noPin = demo || (r === "doctor" && S.doctorPin === false);
+    if (noPin) return `<button class="btn btn-primary btn-lg">${ROLES[r].label} olarak gir ${I.arrow}</button>
+      <span class="gate-note">${demo ? "Demo modu — PIN yok." : "Hekim PIN'i henüz belirlenmedi; giriş açık. İlk iş PIN belirle."}</span>
+      <label class="remember"><input type="checkbox" name="remember" checked><span>Bu cihazı ${REMEMBER_DAYS} gün hatırla</span></label>`;
+    return `<label class="field"><span>${ROLES[r].label} PIN</span><input class="input mono" type="password" name="pin" inputmode="numeric" autocomplete="current-password" placeholder="••••" required></label>
       <button class="btn btn-primary btn-lg" style="align-self:flex-end">Giriş ${I.arrow}</button>
       <label class="remember"><input type="checkbox" name="remember" checked><span>Bu cihazı ${REMEMBER_DAYS} gün hatırla</span></label>`;
   }
@@ -269,7 +273,7 @@
         <main class="page" id="page"></main>
       </div></div>
       ${!Store.live ? `<div class="demo-bar"><span>Demo verisi</span><button class="btn btn-ghost" data-act="reset">Sıfırla</button></div>` : ""}
-      ${Store.live && r === "doctor" && Store.db.meta?.openDoctor ? `<div class="open-bar">${I.lock}<span><b>Hekim PIN'i tanımlı değil.</b> Bu adresi bilen herkes hekim olarak girebilir. Kadro ve sakatlık girmeden önce e-tabloda <b>Pitchside ▸ PIN'leri ayarla</b>.</span></div>` : ""}`;
+      ${Store.live && r === "doctor" && Store.db.meta?.openDoctor ? `<div class="open-bar">${I.lock}<span><b>Hekim PIN'i tanımlı değil.</b> Bu adresi bilen herkes hekim olarak girebilir. Kadro ve sakatlık girmeden önce <a href="#qr" data-nav="qr">QR kodları ▸ Erişim PIN'leri</a> kartından belirle.</span></div>` : ""}`;
     const h = location.hash.slice(1);
     go(r === "athlete" ? "me" : (h && TITLES[h] && nav.some((n) => n[0] === h) ? h : HOME[r]), true);
   }
@@ -549,7 +553,11 @@
           <label class="field"><span>Görevi</span><input class="input" name="label" placeholder="ör. Masör, Kondisyoner, Analist"></label>
           <label class="field"><span>Bitiş tarihi (opsiyonel)</span><input class="input" type="date" name="expires" min="${todayISO}"></label>
           <button class="btn btn-primary">${I.qr} QR oluştur</button></form>
-        <p class="lock-note">${I.lock} Her QR kişiye özeldir; bildirim kimin QR'ıyla girildiği bilinerek kaydedilir. Kaybolan QR'ı “Devre dışı” ile anında kapat.</p></div>
+        <p class="lock-note">${I.lock} Her QR kişiye özeldir; bildirim kimin QR'ıyla girildiği bilinerek kaydedilir. Kaybolan QR'ı “Devre dışı” ile anında kapat.</p>
+        <div class="d-sec" id="pins"><h5>Erişim PIN'leri</h5>${(() => { const ps = Store.db.meta?.pins || {}; return `<form id="pinform" class="fgrid" style="grid-template-columns:1fr;gap:10px">
+          ${["doctor", "physio", "coach"].map((r) => `<label class="field"><span>${ROLES[r].label} <em class="pin-st ${ps[r] ? "on" : ""}">${ps[r] ? "tanımlı" : "tanımsız"}</em></span><input class="input mono" type="password" name="${r}" minlength="6" autocomplete="new-password" placeholder="${ps[r] ? "Değiştirmek için yeni PIN" : "En az 6 karakter"}"></label>`).join("")}
+          <button class="btn btn-ghost">${I.lock} PIN'leri kaydet</button></form>
+          <p class="lock-note">${Store.live ? "PIN'ler e-tabloya değil sunucu ayarlarına yazılır. Hekim PIN'i belirlendiği an hekim girişi PIN'li olur ve “hatırla” oturumları yenilenir." : "Demo modunda PIN yoktur."}</p>`; })()}</div></div>
       <div class="span-8 qr-grid">${toks.map((t, k) => { const off = !t.active || expired(t); return `<div class="card qr-card reveal ${off ? "off" : ""}" style="--d:${k * 40}ms">
         <div class="qr-box">${qrSvg(reporterLink(t), 132)}</div>
         <div class="qr-meta"><span class="tag">${esc(t.label || "Raportör")}</span><h4>${esc(t.name)}</h4>
@@ -1250,6 +1258,20 @@
     const f = e.target;
     e.preventDefault();
     if (f.id === "auth") return login(f.dataset.role, f);
+    if (f.id === "pinform") {
+      const pins = { doctor: f.doctor.value.trim(), physio: f.physio.value.trim(), coach: f.coach.value.trim() };
+      if (!pins.doctor && !pins.physio && !pins.coach) return toast("Yeni PIN yazılmadı");
+      if (Object.values(pins).some((v) => v && v.length < 6)) return toast("PIN en az 6 karakter olmalı");
+      const r = await Store.savePins(pins, auth());
+      if (r.status === "demo") return toast("Demo modunda PIN yok");
+      if (r.status !== "ok") return toast(r.message === "duplicate" ? "Her rolün PIN'i farklı olmalı" : "PIN kaydedilemedi");
+      // A new doctor PIN invalidates PIN-less / old remembered sessions: sign in again with it.
+      if (pins.doctor) {
+        S.session = { role: "doctor", pin: pins.doctor };
+        try { await Store.load({ ...auth(), remember: true }); if (Store.sess) { S.session = { role: "doctor", pin: "", sess: Store.sess }; localStorage.setItem(REMEMBER, JSON.stringify({ role: "doctor", sess: Store.sess, exp: Date.now() + REMEMBER_DAYS * 864e5 })); } sessionStorage.setItem("pitchside.session", JSON.stringify(S.session)); } catch {}
+      }
+      toast("PIN'ler kaydedildi"); startApp(); go("qr", true); return;
+    }
     if (f.id === "tokform") {
       const tok = { id: "", name: f.name.value.trim().slice(0, 80), label: f.label.value.trim().slice(0, 60), token: randomToken(), active: true, expires: f.expires.value || "", created: todayISO, note: "" };
       if (!tok.name) return;
@@ -1343,8 +1365,10 @@
       else if (!S.session) {
         try { const r = JSON.parse(localStorage.getItem(REMEMBER)); if (r && r.exp > Date.now() && ROLES[r.role]) S.session = { role: r.role, pin: "", sess: r.sess || "" }; else forget(); } catch {}
       }
-      if (Store.live && !S.session) Store.db = empty();
-      else await Store.load(auth());
+      if (Store.live && !S.session) {
+        Store.db = empty();
+        try { const st = await api("status"); if (st.status === "ok") S.doctorPin = !!st.doctorPin; } catch {}
+      } else await Store.load(auth());
       if (S.session?.role === "reporter") {
         if (Store.live) S.reporter = Store.db.reporter || null;
         else { const t = (Store.db.tokens || []).find((x) => x.token === S.session.token && x.active && (!x.expires || x.expires >= todayISO)); S.reporter = t ? { id: t.id, name: t.name, label: t.label } : null; }

@@ -7,7 +7,7 @@
 
 const CONFIG = {
   // Paste the Apps Script /exec URL here to go live. Empty = demo mode (localStorage).
-  API_URL: "https://script.google.com/macros/s/AKfycbwgKg6ZuUlpBbYjXeBA8iJ9eLlxAJwcj4q3VfqXphwbgW3vvDe_V6QVFh5PYxrB5Gk7BA/exec",
+  API_URL: "", // canlı: Pitchside API web uygulaması /exec adresi (anonim erişim doğrulanınca)
   TEAM: "A Takım",
   STORE_KEY: "pitchside.v1",
   MATCH_PLAYERS: 11,
@@ -427,6 +427,12 @@ const Store = {
     if (ex) Object.assign(ex, tok); else { tok.id = tok.id || "q" + Date.now().toString(36); this.db.tokens.push(tok); }
     this.persist(); this.emit();
     if (this.live) { const r = await api("saveToken", auth, { tok }); await this.load(auth); this.emit(); if (r.status !== "ok") throw new Error(r.status); }
+  },
+  async savePins(pins, auth) {
+    if (!this.live) return { status: "demo" };
+    const r = await api("savePins", auth, { pins });
+    if (r.status === "ok" && this.db.meta) { this.db.meta.pins = r.pins; this.db.meta.openDoctor = !r.pins.doctor; }
+    return r;
   },
   async saveExposure(row, auth) {
     const ex = this.db.exposure.find((r) => r.week === row.week);

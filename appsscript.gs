@@ -219,6 +219,15 @@ const SETTINGS_DEFAULT = [["Takım adı", "A Takım"], ["Hekim adı", "Dr. Yiği
 
 const R = (col) => `${col}2:${col}`;
 
+/* E-tablo: e-tabloya bağlı betikte etkin dosya; bağımsız API projesinde SHEET_ID (yalnızca o projedeki Config.js'te). */
+let SS_ = null;
+function SS() {
+  if (SS_) return SS_;
+  SS_ = SpreadsheetApp.getActiveSpreadsheet();
+  if (!SS_) SS_ = SpreadsheetApp.openById(typeof SHEET_ID !== "undefined" ? SHEET_ID : PropertiesService.getScriptProperties().getProperty("SHEET_ID"));
+  return SS_;
+}
+
 /* Formüller en_US sözdizimiyle yazılır. E-tablonun yerel ayarı ondalıkta virgül kullanıyorsa (tr_TR gibi)
    Sheets bağımsız değişkenleri ";" ile, dizi sütunlarını "\" ile ayırır — setFormula bunu çevirmez, biz çeviririz. */
 const COMMA_DECIMAL = ["tr", "de", "fr", "es", "it", "pt", "ru", "nl", "pl", "sv", "fi", "da", "nb", "no", "nn", "cs", "sk", "hu", "ro", "bg", "hr", "sl", "sr", "uk", "el", "id", "vi", "lt", "lv", "et", "ca", "eu", "gl", "is", "az", "kk", "be", "mk", "sq", "bs", "ka", "hy", "uz", "mn"];
@@ -226,7 +235,7 @@ let SEMI_ = null;
 function semicolonLocale() {
   if (SEMI_ === null) {
     let loc = "en_US";
-    try { loc = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetLocale() || "en_US"; } catch (e) { /* varsayılan */ }
+    try { loc = SS().getSpreadsheetLocale() || "en_US"; } catch (e) { /* varsayılan */ }
     SEMI_ = COMMA_DECIMAL.indexOf(String(loc).split(/[_-]/)[0].toLowerCase()) >= 0;
   }
   return SEMI_;
@@ -256,6 +265,8 @@ const Q = (tab, col) => `'${tab}'!${col}2:${col}`;
 function doPost(e) {
   let req;
   try { req = JSON.parse(e.postData.contents); } catch (err) { return json({ status: "bad_request" }); }
+  // Kimlik gerektirmeyen tek bilgi: hekim PIN'i tanımlı mı (giriş ekranı PIN alanını buna göre gösterir).
+  if (req.action === "status") return json({ status: "ok", doctorPin: !!PropertiesService.getScriptProperties().getProperty("DOCTOR_PIN") });
   const who = authenticate(req);
   if (who === "locked") return json({ status: "locked" });
   if (!who) return json({ status: "unauthorized" });
@@ -270,6 +281,7 @@ function doPost(e) {
       case "saveMatch": return json(withLock(() => saveMatch(who, req.match, req.appearances)));
       case "removeMatch": return json(withLock(() => removeMatch(who, req.id)));
       case "saveToken": return json(withLock(() => saveToken(who, req.tok)));
+      case "savePins": return json(withLock(() => savePins(who, req.pins)));
       case "removeInjury": return json(withLock(() => removeInjury(who, req.id)));
       case "saveExposure": return json(withLock(() => saveExposure(who, req.row)));
       default: return json({ status: "unknown_action" });
@@ -352,7 +364,8 @@ function getData(who) {
     v: 2, players: players, injuries: injuries, exposure: who.role === "coach" ? [] : readExposure(), seasons: readSeasons(),
     matches: readMatches(), appearances: appearances, tokens: who.role === "doctor" ? readTokens() : [],
     meta: { team: s["Takım adı"] || "", doctorName: staffName("doctor", s), physioName: staffName("physio", s), coachName: staffName("coach", s),
-      openDoctor: who.role === "doctor" && !PropertiesService.getScriptProperties().getProperty("DOCTOR_PIN") },
+      openDoctor: who.role === "doctor" && !PropertiesService.getScriptProperties().getProperty("DOCTOR_PIN"),
+      pins: who.role === "doctor" ? pinState() : null },
   };
 }
 
@@ -496,6 +509,30 @@ function deleteRowsWhere(name, fields, pred) {
   return rows.length;
 }
 
+/* ───────── Erişim PIN'leri (yalnızca hekim, uygulamadan) ───────── */
+function pinState() {
+  const p = PropertiesService.getScriptProperties(), o = {};
+  Object.keys(PIN_KEY).forEach((r) => { o[r] = !!p.getProperty(PIN_KEY[r]); });
+  return o;
+}
+function savePins(who, pins) {
+  if (who.role !== "doctor") return { status: "forbidden" };
+  if (!pins || typeof pins !== "object") return { status: "bad_request" };
+  const p = PropertiesService.getScriptProperties(), next = {};
+  Object.keys(PIN_KEY).forEach((r) => {
+    const v = pins[r] === undefined || pins[r] === null ? "" : String(pins[r]).trim();
+    next[r] = v || p.getProperty(PIN_KEY[r]) || "";
+    if (v && v.length < 6) next.bad = "short";
+  });
+  if (next.bad) return { status: "bad_request", message: "short" };
+  const vals = Object.keys(PIN_KEY).map((r) => next[r]).filter(Boolean);
+  if (new Set(vals).size !== vals.length) return { status: "bad_request", message: "duplicate" };
+  const changed = [];
+  Object.keys(PIN_KEY).forEach((r) => { const v = String(pins[r] || "").trim(); if (v) { p.setProperty(PIN_KEY[r], v); changed.push(L.role[r]); } });
+  audit(who, "pin", "", changed.join(", ") + " PIN'i güncellendi");
+  return { status: "ok", pins: pinState() };
+}
+
 /* ───────── QR anahtarları (yalnızca hekim) ───────── */
 function saveToken(who, tok) {
   if (who.role !== "doctor") return { status: "forbidden" };
@@ -619,7 +656,7 @@ function readSeasons() {
     .sort((a, b) => (a.start < b.start ? -1 : 1));
 }
 function readSettings() {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TAB.settings), out = {};
+  const sh = SS().getSheetByName(TAB.settings), out = {};
   if (!sh || sh.getLastRow() < 2) return out;
   sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues().forEach((r) => { if (String(r[0]).trim()) out[String(r[0]).trim()] = String(r[1]).trim(); });
   return out;
@@ -633,7 +670,7 @@ function staffName(role, s) {
 
 /* ───────── Tablo erişimi (başlık adına göre; sütun sırası değişse de çalışır) ───────── */
 function sheet(name) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+  const sh = SS().getSheetByName(name);
   if (!sh) throw new Error("Sekme yok: " + name + " — Pitchside ▸ Şablonu kur / onar");
   return sh;
 }
@@ -755,7 +792,7 @@ function onOpen() {
     .addSeparator()
     .addItem("Web uygulaması adresi", "menuUrl")
     .addToUi();
-  const ss = SpreadsheetApp.getActiveSpreadsheet(), panel = ss.getSheetByName(TAB.panel);
+  const ss = SS(), panel = ss.getSheetByName(TAB.panel);
   const fresh = !ss.getSheetByName(TAB.injuries);
   if (fresh || !panel || panel.getRange("L1").getValue() !== TEMPLATE_V) {
     try {
@@ -768,7 +805,7 @@ function onOpen() {
 }
 
 function buildTemplate() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SS();
   try { if (ss.getSpreadsheetTimeZone() !== "Europe/Istanbul") ss.setSpreadsheetTimeZone("Europe/Istanbul"); } catch (e) { /* yetki yoksa geç */ }
   const t = {};
   t.settings = ensureTable(ss, TAB.settings, F_SETTINGS, [], { tab: "#b8bdc6" });
@@ -1132,27 +1169,11 @@ function menuSetup() {
   SpreadsheetApp.getUi().alert("Pitchside", "Şablon kuruldu / onarıldı. Veriler korunur.", SpreadsheetApp.getUi().ButtonSet.OK);
 }
 function menuPins() {
-  const ui = SpreadsheetApp.getUi(), props = PropertiesService.getScriptProperties();
-  const ask = (title, has) => {
-    const r = ui.prompt(title, (has ? "Bir PIN zaten tanımlı. Değiştirmek için yenisini yazın, korumak için boş bırakın.\n\n" : "") + "En az 6 karakter. PIN bu e-tabloya değil, betik ayarlarına kaydedilir.", ui.ButtonSet.OK_CANCEL);
-    return r.getSelectedButton() === ui.Button.OK ? r.getResponseText().trim() : null;
-  };
-  const d = ask("Hekim PIN'i", !!props.getProperty("DOCTOR_PIN"));
-  if (d === null) return;
-  const p = ask("Fizyoterapist PIN'i", !!props.getProperty("PHYSIO_PIN"));
-  if (p === null) return;
-  const c = ask("Teknik ekip PIN'i (yalnızca uygunluk görür)", !!props.getProperty("COACH_PIN"));
-  if (c === null) return;
-  if ([d, p, c].some((x) => x && x.length < 6)) return ui.alert("PIN en az 6 karakter olmalı. Hiçbir şey değiştirilmedi.");
-  const all = [d || props.getProperty("DOCTOR_PIN"), p || props.getProperty("PHYSIO_PIN"), c || props.getProperty("COACH_PIN")].filter(Boolean);
-  if (new Set(all).size !== all.length) return ui.alert("Her rolün PIN'i farklı olmalı. Hiçbir şey değiştirilmedi.");
-  if (d) props.setProperty("DOCTOR_PIN", d);
-  if (p) props.setProperty("PHYSIO_PIN", p);
-  if (c) props.setProperty("COACH_PIN", c);
-  ui.alert("PIN'ler kaydedildi.");
+  // PIN'ler web uygulamasını çalıştıran API projesinin ayarlarında durur; e-tabloya bağlı bu betik onlara erişemez.
+  SpreadsheetApp.getUi().alert("PIN'ler", "Erişim PIN'leri uygulamadan ayarlanır: hekim olarak giriş ▸ QR kodları ▸ Erişim PIN'leri.\n\nPIN'ler bu e-tabloya yazılmaz.", SpreadsheetApp.getUi().ButtonSet.OK);
 }
 function menuFill() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SS();
   const a = fillPlayers(sheet(TAB.players), 2, sheet(TAB.players).getLastRow());
   const b = fillInjuries(sheet(TAB.injuries), 2, sheet(TAB.injuries).getLastRow());
   const c = fillTokens(sheet(TAB.tokens), 2, sheet(TAB.tokens).getLastRow()) + fillMatches(sheet(TAB.matches), 2, sheet(TAB.matches).getLastRow());
@@ -1165,12 +1186,12 @@ function menuUrl() {
 
 /* ═════════════════════════ Yardımcılar ═════════════════════════ */
 function audit(who, op, ref, detail) {
-  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TAB.audit);
+  const sh = SS().getSheetByName(TAB.audit);
   if (sh) sh.appendRow([new Date(), safe(who.name), L.role[who.role] || who.role, op, safe(ref), safe(detail)]);
 }
 function withLock(fn) { const l = LockService.getScriptLock(); l.waitLock(20000); try { return fn(); } finally { l.releaseLock(); } }
 function json(o) { return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }
-function tzOf() { return SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
+function tzOf() { return SS().getSpreadsheetTimeZone() || Session.getScriptTimeZone(); }
 function todayISO() { return Utilities.formatDate(new Date(), tzOf(), "yyyy-MM-dd"); }
 function ageOn(birth, today) {
   let a = Number(today.slice(0, 4)) - Number(birth.slice(0, 4));
