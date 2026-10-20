@@ -7,7 +7,7 @@
 
 const CONFIG = {
   // Paste the Apps Script /exec URL here to go live. Empty = demo mode (localStorage).
-  API_URL: "", // canlı: Pitchside API web uygulaması /exec adresi (anonim erişim doğrulanınca)
+  API_URL: "https://script.google.com/macros/s/AKfycbwgKg6ZuUlpBbYjXeBA8iJ9eLlxAJwcj4q3VfqXphwbgW3vvDe_V6QVFh5PYxrB5Gk7BA/exec",
   TEAM: "A Takım",
   STORE_KEY: "pitchside.v1",
   MATCH_PLAYERS: 11,

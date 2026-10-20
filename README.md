@@ -41,7 +41,8 @@ Tüm veriler takımın Google E-Tablosunda, her alan kendi sütununda durur (Pan
 Şablon değişirse `TEMPLATE_V`'yi artır → bir sonraki açılışta veriler korunarak onarılır.
 
 ## Canlıya geçiş
-1. ~~E-tablo + Apps Script~~ · ~~Web uygulaması (`CONFIG.API_URL`)~~ — yapıldı.
+1. ~~E-tablo + Apps Script~~ · ~~Web uygulaması (`CONFIG.API_URL`)~~ — yapıldı; site canlı e-tabloya bağlı.
+2. Hekim PIN'i: uygulamada **QR kodları ▸ Erişim PIN'leri** (tanımlanana kadar hekim girişi açıktır, uyarı şeridi görünür).
 0. Şablon büyüdüğü için açılıştaki otomatik onarım 30 sn sınırına takılabilir: **Pitchside ▸ Şablonu kur / onar** menüden çalıştırılır.
 2. **Pitchside ▸ PIN'leri ayarla…** — hekim, fizyoterapist, teknik ekip (her biri farklı, en az 6 karakter; betik ayarlarına yazılır).
 3. **Oyuncular** sekmesine kadroyu ve pozisyonları yaz; kişisel kodları sporculara ilet.
