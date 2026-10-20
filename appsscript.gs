@@ -16,12 +16,16 @@
  *  - Fizyoterapist (PIN): kayıt açar/düzenler, aşama en fazla "Antrenmana dönüş"; tanı onayı, oyuna dönüş ve silme yok.
  *  - Teknik ekip (PIN): yalnızca okur — oyuncu uygunluğu, bölge, aşama ve tahmini dönüş. Tanı, doku, mekanizma,
  *    klinik not ve sporcu ifadesi sunucudan HİÇ gönderilmez (KVKK: sağlık verisi bilmesi gereken kadar).
- *  - Hekim (PIN): tam yetki.
+ *  - QR raportörü (QR Kodları sekmesindeki anahtar): yalnızca aktif oyunculardan birinin adına YENİ bildirim açar
+ *    (en fazla 14 gün geriye). Hiçbir veriyi okuyamaz; kayıt "Bildirildi" olarak düşer ve değerlendirilene kadar
+ *    istatistiklere girmez. Aktif = Hayır ya da Bitiş tarihi geçmişse anahtar çalışmaz.
+ *  - Hekim (PIN): tam yetki. "Bu cihazı hatırla": sunucu 30 günlük imzalı oturum verir; PIN değişirse geçersizleşir.
  */
 
 const TAB = {
   panel: "Panel", injuries: "Sakatlıklar", players: "Oyuncular", notes: "Notlar",
   exposure: "Maruziyet", seasons: "Sezonlar", settings: "Ayarlar", audit: "Denetim",
+  matches: "Maçlar", apps: "Maç kadrosu", tokens: "QR Kodları",
 };
 
 /* ───────── Sözlük: uygulama kodu → tablodaki etiket ───────── */
@@ -47,14 +51,22 @@ const L = {
   recurrence: { new: "Yeni", recurrent: "Tekrarlayan", subsequent: "Sonraki (farklı)" },
   stage: { reported: "Bildirildi", acute: "Akut değerlendirme", rehab: "Rehabilitasyon", rtt: "Antrenmana dönüş", rtp: "Oyuna döndü" },
   canPlay: { yes: "Evet", limited: "Kısıtlı", no: "Hayır" },
-  role: { athlete: "Sporcu", physio: "Fizyoterapist", coach: "Teknik ekip", doctor: "Hekim" },
+  role: { athlete: "Sporcu", physio: "Fizyoterapist", coach: "Teknik ekip", doctor: "Hekim", reporter: "QR bildirimi" },
+  comp: { league: "Lig", cup: "Kupa", europe: "Avrupa", friendly: "Hazırlık", other: "Diğer" },
+  venue: { home: "İç saha", away: "Deplasman", neutral: "Tarafsız" },
+  surface: { grass: "Doğal çim", hybrid: "Hibrit çim", artificial: "Sentetik" },
+  appStatus: { start: "İlk 11", sub: "Yedekten girdi", unused: "Kulübede kaldı", coach: "Teknik karar", injured: "Sakat", ill: "Hasta", suspended: "Cezalı", national: "Milli takım", other: "Diğer" },
   pos: { GK: "GK", RB: "RB", CB: "CB", LB: "LB", DM: "DM", CM: "CM", AM: "AM", RW: "RW", LW: "LW", ST: "ST" },
 };
 const DEF = { region: "", side: "R", tissue: "other", mechanism: "noncontact", activity: "training", situation: "other", onset: "sudden", recurrence: "new", stage: "", canPlay: "", role: "", pos: "" };
 const MIDLINE = ["head", "neck", "chest", "abdomen", "thoracic", "lumbar"];
 const PHYSIO_STAGES = ["acute", "rehab", "rtt"];
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
-const TEMPLATE_V = "futbol şablon v1";
+const TEMPLATE_V = "futbol şablon v2";
+const PIN_KEY = { doctor: "DOCTOR_PIN", physio: "PHYSIO_PIN", coach: "COACH_PIN" };
+const MATCH_ROLES = { doctor: 1, physio: 1 };
+const PLAYED = { start: 1, sub: 1 };
+const SESSION_DAYS = 30, REPORT_BACK_DAYS = 14;
 const INK = "#0a0a0b", BLUE = "#2563ff", MUTED = "#8a8a91", PAPER = "#f6f6f4", LINE = "#e4e4e1";
 
 /* ───────── Şema: k = uygulama alanı, h = sütun başlığı (okuma/yazma başlığa göre yapılır) ───────── */
@@ -78,6 +90,8 @@ const F_INJURIES = [
   { k: "rtpDate", h: "Oyuna dönüş", t: "date", w: 100, n: "Tam katılıma dönüş günü. Boşsa vaka açıktır." },
   { k: "pain", h: "Ağrı (0–10)", t: "int", w: 84 },
   { k: "reportedBy", h: "Bildiren", t: "enum", e: "role", w: 104 },
+  { k: "reporterName", h: "Bildiren kişi", t: "text", w: 150, n: "QR ile girilen bildirimde QR sahibinin adı — sunucu yazar." },
+  { k: "reporterId", h: "QR ID", t: "text", w: 64 },
   { k: "athleteNote", h: "Sporcu ifadesi", t: "text", w: 240 },
   { k: "canPlay", h: "Oynayabilir mi", t: "enum", e: "canPlay", w: 104, n: "Sporcunun kendi beyanı." },
   { k: "assessedBy", h: "Değerlendiren", t: "text", w: 140 },
@@ -96,6 +110,11 @@ const C_INJURIES = [
     f: (c, x) => {
       const s = `SORT(FILTER({${Q(TAB.seasons, x.sea.start)},${Q(TAB.seasons, x.sea.end)},${Q(TAB.seasons, x.sea.label)}},${Q(TAB.seasons, x.sea.start)}<>""))`;
       return `IF(${R(c.date)}="",,IFERROR(IF(${R(c.date)}<=VLOOKUP(${R(c.date)},${s},2,1),VLOOKUP(${R(c.date)},${s},3,1),""),""))`;
+    } },
+  { h: "Kaçırılan maç", w: 96, fmt: "0", n: "Otomatik. Sakatlık tarihi ile oyuna dönüş arasındaki takım maçları (Maçlar sekmesinden). Maçta olan sakatlıkta o maç sayılmaz.",
+    f: (c, x) => {
+      const d = Q(TAB.matches, x.mat.date);
+      return `IF(${R(c.date)}="",,IF((${R(c.timeLoss)}="Hayır")+(${R(c.stage)}="${L.stage.reported}"),0,COUNTIFS(${d},IF(${R(c.activity)}="${L.activity.game}",">",">=")&${R(c.date)},${d},"<"&IF(${R(c.rtpDate)}<>"",${R(c.rtpDate)},TODAY()+1),${d},"<="&TODAY())))`;
     } },
 ];
 const F_PLAYERS = [
@@ -131,8 +150,53 @@ const F_EXPOSURE = [
 ];
 const C_EXPOSURE = [
   { h: "Antrenman (sa)", w: 112, fmt: "0.#", n: "Otomatik: seans × saat × oyuncu.", f: (c) => `IF(${R(c.week)}="",,${R(c.sessions)}*${R(c.hours)}*${R(c.players)})` },
-  { h: "Maç (sa)", w: 84, fmt: "0.#", n: "Otomatik: maç × 11 oyuncu × 90 dk.", f: (c) => `IF(${R(c.week)}="",,${R(c.games)}*11*90/60)` },
+  { h: "Maç (sa)", w: 84, fmt: "0.#", n: "Otomatik: o haftanın maç kadrolarındaki bireysel dakikalar / 60. Kadro girilmemişse maç × 11 oyuncu × 90 dk.",
+    f: (c, x) => {
+      const mins = `SUMIFS(${Q(TAB.apps, x.app.minutes)},${Q(TAB.apps, x.app.date)},">="&${R(c.week)},${Q(TAB.apps, x.app.date)},"<"&(${R(c.week)}+7))`;
+      return `IF(${R(c.week)}="",,IF(${mins}>0,${mins}/60,${R(c.games)}*11*90/60))`;
+    } },
   { h: "Toplam (sa)", w: 96, fmt: "0.#", n: "Otomatik.", f: (c) => `IF(${R(c.week)}="",,${R(c["Antrenman (sa)"])}+${R(c["Maç (sa)"])})` },
+];
+const F_MATCHES = [
+  { k: "id", h: "ID", t: "text", w: 64, n: "Otomatik (M001…). Değiştirmeyin." },
+  { k: "date", h: "Tarih", t: "date", w: 92 },
+  { k: "opponent", h: "Rakip", t: "text", w: 160 },
+  { k: "comp", h: "Organizasyon", t: "enum", e: "comp", w: 110 },
+  { k: "venue", h: "Saha", t: "enum", e: "venue", w: 96 },
+  { k: "surface", h: "Zemin", t: "enum", e: "surface", w: 104 },
+  { k: "duration", h: "Süre (dk)", t: "int", w: 76, n: "90 ya da uzatmalı maçta 120." },
+  { k: "score", h: "Skor", t: "text", w: 64 },
+  { k: "note", h: "Not", t: "text", w: 220 },
+];
+const C_MATCHES = [
+  { h: "Toparlanma (gün)", w: 104, fmt: "0", n: "Otomatik. Bir önceki maçtan bu yana geçen gün (21 günden uzunsa boş: sezon başı / ara). ≤4 gün = yoğun fikstür (Bengtsson 2013).",
+    f: (c) => `MAP(${R(c.date)},LAMBDA(d,IF(d="",,IFERROR(LET(p,MAXIFS(${R(c.date)},${R(c.date)},"<"&d),IF(p=0,"",IF(d-p>21,"",d-p))),""))))` },
+  { h: "Kadrodaki oyuncu", w: 96, fmt: "0", n: "Otomatik (Maç kadrosu sekmesi).", f: (c, x) => `IF(${R(c.id)}="",,COUNTIF(${Q(TAB.apps, x.app.matchId)},${R(c.id)}))` },
+  { h: "Sakat", w: 64, fmt: "0", n: "Otomatik.", f: (c, x) => `IF(${R(c.id)}="",,COUNTIFS(${Q(TAB.apps, x.app.matchId)},${R(c.id)},${Q(TAB.apps, x.app.status)},"${L.appStatus.injured}"))` },
+  { h: "Uygunluk", w: 84, fmt: "0%", n: "Otomatik. Kadronun sakat ya da hasta olmayan oranı (Hägglund 2013 maç uygunluğu).",
+    f: (c, x) => `IF(${R(c.id)}="",,IF(COUNTIF(${Q(TAB.apps, x.app.matchId)},${R(c.id)})=0,"",1-(COUNTIFS(${Q(TAB.apps, x.app.matchId)},${R(c.id)},${Q(TAB.apps, x.app.status)},"${L.appStatus.injured}")+COUNTIFS(${Q(TAB.apps, x.app.matchId)},${R(c.id)},${Q(TAB.apps, x.app.status)},"${L.appStatus.ill}"))/COUNTIF(${Q(TAB.apps, x.app.matchId)},${R(c.id)})))` },
+  { h: "Toplam dakika", w: 92, fmt: "0", n: "Otomatik. Bireysel maç maruziyeti.", f: (c, x) => `IF(${R(c.id)}="",,SUMIF(${Q(TAB.apps, x.app.matchId)},${R(c.id)},${Q(TAB.apps, x.app.minutes)}))` },
+];
+const F_APPS = [
+  { k: "matchId", h: "Maç ID", t: "text", w: 70 },
+  { k: "date", h: "Tarih", t: "date", w: 92, n: "Maçın tarihi (filtre için)." },
+  { k: "playerId", h: "Oyuncu ID", t: "text", w: 78 },
+  { k: "playerName", h: "Oyuncu", t: "text", w: 150 },
+  { k: "status", h: "Durum", t: "enum", e: "appStatus", w: 130, n: "İlk 11 · Yedekten girdi · Kulübede kaldı · Teknik karar · Sakat · Hasta · Cezalı · Milli takım · Diğer" },
+  { k: "minutes", h: "Dakika", t: "int", w: 70 },
+];
+const F_TOKENS = [
+  { k: "id", h: "ID", t: "text", w: 60, n: "Otomatik (Q001…). Değiştirmeyin." },
+  { k: "name", h: "Kişi", t: "text", w: 160, n: "Ad yazınca ID ve QR anahtarı kendiliğinden oluşur. QR görselini uygulamadaki QR kodları ekranından alın." },
+  { k: "label", h: "Görevi", t: "text", w: 140 },
+  { k: "token", h: "QR anahtarı", t: "text", w: 110, n: "Gizli: QR bu anahtarı içerir. Kaybolursa / paylaşılırsa Aktif = Hayır." },
+  { k: "active", h: "Aktif", t: "bool", w: 64 },
+  { k: "expires", h: "Bitiş", t: "date", w: 92, n: "Boşsa süresiz." },
+  { k: "created", h: "Oluşturma", t: "date", w: 92 },
+  { k: "note", h: "Not", t: "text", w: 200 },
+];
+const C_TOKENS = [
+  { h: "Bildirim sayısı", w: 96, fmt: "0", n: "Otomatik.", f: (c, x) => `IF(${R(c.id)}="",,COUNTIF(${Q(TAB.injuries, x.inj.reporterId)},${R(c.id)}))` },
 ];
 const F_SEASONS = [
   { k: "label", h: "Sezon", t: "text", w: 96, n: "Örn. 2026–27" },
@@ -197,8 +261,15 @@ function doPost(e) {
   if (!who) return json({ status: "unauthorized" });
   try {
     switch (req.action) {
-      case "getData": return json({ status: "ok", data: getData(who) });
+      case "getData": {
+        const out = { status: "ok", data: getData(who) };
+        if (req.remember && who.viaPin && PIN_KEY[who.role]) out.sess = makeSession(who.role);
+        return json(out);
+      }
       case "saveInjury": return json(who.role === "coach" ? { status: "forbidden" } : withLock(() => saveInjury(who, req.injury)));
+      case "saveMatch": return json(withLock(() => saveMatch(who, req.match, req.appearances)));
+      case "removeMatch": return json(withLock(() => removeMatch(who, req.id)));
+      case "saveToken": return json(withLock(() => saveToken(who, req.tok)));
       case "removeInjury": return json(withLock(() => removeInjury(who, req.id)));
       case "saveExposure": return json(withLock(() => saveExposure(who, req.row)));
       default: return json({ status: "unknown_action" });
@@ -215,10 +286,16 @@ function authenticate(req) {
   if (fails >= 30) return "locked";
   const props = PropertiesService.getScriptProperties(), s = readSettings();
   let who = null;
-  const PIN_KEY = { doctor: "DOCTOR_PIN", physio: "PHYSIO_PIN", coach: "COACH_PIN" };
-  if (PIN_KEY[req.role] && req.pin) {
+  if (PIN_KEY[req.role] && req.sess) {
+    const parts = String(req.sess).split("."), pin = props.getProperty(PIN_KEY[req.role]);
+    if (parts.length === 3 && parts[0] === req.role && Number(parts[1]) > Date.now() && pin && signSession(parts[0], parts[1], pin) === parts[2]) who = { role: req.role, name: staffName(req.role, s) };
+  } else if (PIN_KEY[req.role] && req.pin) {
     const pin = props.getProperty(PIN_KEY[req.role]);
-    if (pin && String(req.pin) === pin) who = { role: req.role, name: staffName(req.role, s) };
+    if (pin && String(req.pin) === pin) who = { role: req.role, name: staffName(req.role, s), viaPin: true };
+  } else if (req.role === "reporter" && req.token) {
+    const tk = String(req.token).trim().toUpperCase(), today = todayISO();
+    const t = readTokens().filter((x) => x.active && x.token && x.token.toUpperCase() === tk && (!x.expires || x.expires >= today))[0];
+    if (t) who = { role: "reporter", name: t.name, label: t.label, tokenId: t.id };
   } else if (req.role === "athlete" && req.code) {
     const code = String(req.code).trim().toUpperCase();
     const p = readPlayers().filter((x) => x.active && x.code && x.code.toUpperCase() === code)[0];
@@ -228,11 +305,36 @@ function authenticate(req) {
   return who;
 }
 
+/* ───────── "Bu cihazı hatırla": imzalı oturum (rol.bitiş.imza). İmza PIN'i de içerir → PIN değişince tüm oturumlar düşer. ───────── */
+function sessionSecret() {
+  const p = PropertiesService.getScriptProperties();
+  let k = p.getProperty("SESSION_SECRET");
+  if (!k) { k = Utilities.getUuid() + Utilities.getUuid(); p.setProperty("SESSION_SECRET", k); }
+  return k;
+}
+function signSession(role, exp, pin) {
+  return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(role + "." + exp + "." + pin, sessionSecret())).replace(/=+$/, "");
+}
+function makeSession(role) {
+  const pin = PropertiesService.getScriptProperties().getProperty(PIN_KEY[role]), exp = String(Date.now() + SESSION_DAYS * 864e5);
+  return role + "." + exp + "." + signSession(role, exp, pin);
+}
+
 function getData(who) {
-  let players = readPlayers(), injuries = readInjuries();
+  const s0 = readSettings();
+  if (who.role === "reporter") {
+    // QR raportörü yalnızca oyuncu listesini (ad, forma, pozisyon) görür — başka hiçbir veri gönderilmez.
+    return {
+      v: 2, players: readPlayers().filter((p) => p.active).map((p) => ({ id: p.id, name: p.name, no: p.no, pos: p.pos, active: true })),
+      injuries: [], exposure: [], matches: [], appearances: [], tokens: [], seasons: readSeasons(),
+      reporter: { id: who.tokenId, name: who.name, label: who.label || "" }, meta: { team: s0["Takım adı"] || "" },
+    };
+  }
+  let players = readPlayers(), injuries = readInjuries(), appearances = readApps();
   if (who.role === "athlete") {
     players = players.filter((p) => p.id === who.playerId);
     injuries = injuries.filter((i) => i.playerId === who.playerId);
+    appearances = appearances.filter((a) => a.playerId === who.playerId);
   }
   if (who.role !== "doctor") players = players.map((p) => Object.assign({}, p, { code: p.id === who.playerId ? p.code : "" }));
   if (who.role === "coach") {
@@ -245,6 +347,7 @@ function getData(who) {
   const s = readSettings();
   return {
     v: 2, players: players, injuries: injuries, exposure: who.role === "coach" ? [] : readExposure(), seasons: readSeasons(),
+    matches: readMatches(), appearances: appearances, tokens: who.role === "doctor" ? readTokens() : [],
     meta: { team: s["Takım adı"] || "", doctorName: staffName("doctor", s), physioName: staffName("physio", s), coachName: staffName("coach", s) },
   };
 }
@@ -254,21 +357,29 @@ function saveInjury(who, input) {
   const players = readPlayers(), all = readInjuries(), today = todayISO();
   const prev = input.id ? all.filter((i) => i.id === String(input.id))[0] || null : null;
   let inj;
-  if (who.role === "athlete") {
+  if (who.role === "athlete" || who.role === "reporter") {
     if (prev) {
-      if (prev.playerId !== who.playerId || prev.stage === "rtp") return { status: "forbidden" };
+      if (who.role === "reporter" || prev.playerId !== who.playerId || prev.stage === "rtp") return { status: "forbidden" };
       inj = prev; // sporcu mevcut kayıtta yalnızca not ekleyebilir
     } else {
       if (L.region[input.region] === undefined) return { status: "bad_request" };
+      let pid = who.playerId;
+      if (who.role === "reporter") {
+        const pl = players.filter((p) => p.active && p.id === String(input.playerId || ""))[0];
+        if (!pl) return { status: "bad_request", message: "player" };
+        pid = pl.id;
+      }
+      const minDate = Utilities.formatDate(new Date(Date.now() - REPORT_BACK_DAYS * 864e5), tzOf(), "yyyy-MM-dd");
       inj = {
-        id: "", playerId: who.playerId, date: ISO.test(input.date) && input.date <= today ? input.date : today,
+        id: "", playerId: pid, date: ISO.test(input.date) && input.date <= today && input.date >= minDate ? input.date : today,
         region: input.region, side: MIDLINE.indexOf(input.region) >= 0 ? "C" : (L.side[input.side] ? input.side : "R"),
         tissue: "other", diagnosis: "",
         mechanism: input.onset === "gradual" ? "overuse" : ["duel", "tackle", "fall"].indexOf(input.situation) >= 0 ? "contact" : "noncontact",
+        reporterName: who.role === "reporter" ? who.name + (who.label ? " · " + who.label : "") : "", reporterId: who.role === "reporter" ? who.tokenId : "",
         activity: L.activity[input.activity] ? input.activity : "training", situation: L.situation[input.situation] ? input.situation : "other",
         onset: L.onset[input.onset] ? input.onset : "sudden",
         recurrence: "new", timeLoss: input.canPlay === "no", expectedDays: 0, stage: "reported", rtpDate: null,
-        pain: clampInt(input.pain, 0, 10), reportedBy: "athlete", athleteNote: str(input.athleteNote, 1000),
+        pain: clampInt(input.pain, 0, 10), reportedBy: who.role, athleteNote: str(input.athleteNote, 1000),
         canPlay: L.canPlay[input.canPlay] ? input.canPlay : "limited", assessed: null, diagnosed: null,
       };
     }
@@ -334,6 +445,94 @@ function saveExposure(who, row) {
   return { status: "ok" };
 }
 
+/* ───────── Maçlar ve maç kadrosu ───────── */
+function saveMatch(who, input, apps) {
+  if (!MATCH_ROLES[who.role]) return { status: "forbidden" };
+  if (!input || !ISO.test(input.date)) return { status: "bad_request" };
+  const all = readMatches(), prev = input.id ? all.filter((m) => m.id === String(input.id))[0] : null;
+  const en = (name, v, def) => (L[name][v] !== undefined ? v : def);
+  const id = prev ? prev.id : nextId(all.map((m) => m.id), "M", 3);
+  const dur = [90, 120].indexOf(Number(input.duration)) >= 0 ? Number(input.duration) : 90;
+  const m = { id: id, date: input.date, opponent: str(input.opponent, 80), comp: en("comp", input.comp, "league"), venue: en("venue", input.venue, "home"),
+    surface: en("surface", input.surface, "grass"), duration: dur, score: str(input.score, 12), note: str(input.note, 300) };
+  writeRecord(TAB.matches, F_MATCHES, m, "id", id);
+  const names = {};
+  readPlayers().forEach((p) => { names[p.id] = p.name; });
+  const seen = {}, rows = [];
+  (Array.isArray(apps) ? apps : []).forEach((a) => {
+    if (!a || !names[a.playerId] || seen[a.playerId] || L.appStatus[a.status] === undefined) return;
+    seen[a.playerId] = 1;
+    rows.push({ matchId: id, date: m.date, playerId: a.playerId, playerName: names[a.playerId], status: a.status, minutes: PLAYED[a.status] ? clampInt(a.minutes, 0, dur) : 0 });
+  });
+  deleteRowsWhere(TAB.apps, F_APPS, (r) => r.matchId === id);
+  appendRecords(TAB.apps, F_APPS, rows);
+  audit(who, prev ? "maç güncelle" : "maç yeni", id, m.date + " " + m.opponent + " · " + rows.length + " kadro satırı");
+  return { status: "ok", id: id };
+}
+function removeMatch(who, id) {
+  if (who.role !== "doctor") return { status: "forbidden" };
+  const n = deleteRowsWhere(TAB.matches, F_MATCHES, (r) => r.id === String(id));
+  if (!n) return { status: "not_found" };
+  deleteRowsWhere(TAB.apps, F_APPS, (r) => r.matchId === String(id));
+  audit(who, "maç sil", String(id), "");
+  return { status: "ok" };
+}
+/** Koşula uyan satırları siler (ardışık satırlar tek seferde); sekme boyutu korunur. Silinen satır sayısını döndürür. */
+function deleteRowsWhere(name, fields, pred) {
+  const rows = readRecords(name, fields).filter(pred).map((r) => r._row).sort((a, b) => b - a);
+  const sh = sheet(name);
+  let i = 0;
+  while (i < rows.length) {
+    let n = 1;
+    while (i + n < rows.length && rows[i + n] === rows[i] - n) n++;
+    sh.deleteRows(rows[i] - n + 1, n);
+    i += n;
+  }
+  if (rows.length) sh.insertRowsAfter(sh.getMaxRows(), rows.length);
+  return rows.length;
+}
+
+/* ───────── QR anahtarları (yalnızca hekim) ───────── */
+function saveToken(who, tok) {
+  if (who.role !== "doctor") return { status: "forbidden" };
+  if (!tok || typeof tok !== "object") return { status: "bad_request" };
+  const all = readTokens(), prev = tok.id ? all.filter((t) => t.id === String(tok.id))[0] : null;
+  const rec = prev ? Object.assign({}, prev) : { id: nextId(all.map((t) => t.id), "Q", 3), token: newToken(all), created: todayISO(), active: true, note: "" };
+  if (tok.name !== undefined) rec.name = str(tok.name, 80) || rec.name;
+  if (tok.label !== undefined) rec.label = str(tok.label, 60);
+  if (tok.note !== undefined) rec.note = str(tok.note, 200);
+  if (tok.expires !== undefined) rec.expires = ISO.test(tok.expires) ? tok.expires : "";
+  if (tok.active !== undefined) rec.active = !!tok.active;
+  if (!rec.name) return { status: "bad_request" };
+  writeRecord(TAB.tokens, F_TOKENS, rec, "id", rec.id);
+  audit(who, prev ? "qr güncelle" : "qr yeni", rec.id, rec.name + (rec.active ? "" : " · devre dışı"));
+  return { status: "ok", id: rec.id };
+}
+function newToken(all) {
+  const a = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", used = {};
+  (all || []).forEach((t) => { used[t.token] = 1; });
+  for (;;) {
+    const b = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, Utilities.getUuid() + Date.now());
+    let s = "";
+    for (let i = 0; i < 9; i++) s += a.charAt((b[i] + 256) % a.length);
+    if (!used[s]) return s;
+  }
+}
+function readMatches() {
+  return readRecords(TAB.matches, F_MATCHES).filter((m) => m.id && m.date).map((m) => ({
+    id: m.id, date: m.date, opponent: m.opponent, comp: m.comp || "league", venue: m.venue || "home", surface: m.surface || "grass",
+    duration: m.duration || 90, score: m.score, note: m.note,
+  })).sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+function readApps() {
+  return readRecords(TAB.apps, F_APPS).filter((a) => a.matchId && a.playerId && a.status).map((a) => ({ matchId: a.matchId, playerId: a.playerId, status: a.status, minutes: a.minutes || 0 }));
+}
+function readTokens() {
+  return readRecords(TAB.tokens, F_TOKENS).filter((t) => t.id && t.name).map((t) => ({
+    id: t.id, name: t.name, label: t.label, token: t.token, active: t.active !== false, expires: t.expires, created: t.created, note: t.note,
+  }));
+}
+
 /* ───────── Alan temizliği ───────── */
 function cleanInjury(src, prev) {
   const en = (name, v, def) => (L[name][v] !== undefined ? v : def);
@@ -357,6 +556,8 @@ function cleanInjury(src, prev) {
     rtpDate: ISO.test(src.rtpDate) ? src.rtpDate : null,
     pain: clampInt(src.pain, 0, 10),
     reportedBy: prev ? prev.reportedBy : "",
+    reporterName: prev ? prev.reporterName || "" : "",
+    reporterId: prev ? prev.reporterId || "" : "",
     athleteNote: prev ? prev.athleteNote : "",
     canPlay: prev ? prev.canPlay : null,
     assessed: prev ? prev.assessed : null,
@@ -368,7 +569,7 @@ function injuryToRecord(i, playerName, who) {
     id: i.id, playerId: i.playerId, playerName: playerName, date: i.date, region: i.region, side: i.side, tissue: i.tissue,
     diagnosis: i.diagnosis, mechanism: i.mechanism, activity: i.activity, situation: i.situation || "other", onset: i.onset, recurrence: i.recurrence,
     timeLoss: !!i.timeLoss, expectedDays: i.expectedDays || "", stage: i.stage, rtpDate: i.rtpDate || "", pain: i.pain,
-    reportedBy: i.reportedBy, athleteNote: i.athleteNote || "", canPlay: i.canPlay || "",
+    reportedBy: i.reportedBy, reporterName: i.reporterName || "", reporterId: i.reporterId || "", athleteNote: i.athleteNote || "", canPlay: i.canPlay || "",
     assessedBy: i.assessed ? i.assessed.by : "", assessedAt: i.assessed ? i.assessed.at : "",
     diagnosedBy: i.diagnosed ? i.diagnosed.by : "", diagnosedAt: i.diagnosed ? i.diagnosed.at : "",
     updatedBy: who.name, updatedAt: new Date(),
@@ -396,7 +597,7 @@ function readInjuries() {
       tissue: o.tissue || "other", diagnosis: o.diagnosis, mechanism: o.mechanism || "noncontact", activity: o.activity || "training", situation: o.situation || "other",
       onset: o.onset || "sudden", recurrence: o.recurrence || "new", timeLoss: o.timeLoss !== false, expectedDays: o.expectedDays || 0,
       stage: stage, rtpDate: stage === "rtp" ? (o.rtpDate || o.date) : null, pain: o.pain === null ? 0 : o.pain,
-      reportedBy: o.reportedBy || "doctor", athleteNote: o.athleteNote, canPlay: o.canPlay || null,
+      reportedBy: o.reportedBy || "doctor", reporterName: o.reporterName || "", reporterId: o.reporterId || "", athleteNote: o.athleteNote, canPlay: o.canPlay || null,
       assessed: o.assessedBy ? { by: o.assessedBy, at: o.assessedAt || o.date } : null,
       diagnosed: o.diagnosedBy ? { by: o.diagnosedBy, at: o.diagnosedAt || o.date } : null,
       notes: (notes[o.id] || []).sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)),
@@ -546,7 +747,7 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu("Pitchside")
     .addItem("Şablonu kur / onar", "menuSetup")
     .addItem("PIN'leri ayarla…", "menuPins")
-    .addItem("Eksik ID ve kişisel kodları üret", "menuFill")
+    .addItem("Eksik ID, kişisel kod ve QR anahtarlarını üret", "menuFill")
     .addSeparator()
     .addItem("Web uygulaması adresi", "menuUrl")
     .addToUi();
@@ -572,11 +773,14 @@ function buildTemplate() {
   t.injuries = ensureTable(ss, TAB.injuries, F_INJURIES, C_INJURIES, { tab: INK, freezeCols: 3, filter: true });
   t.notes = ensureTable(ss, TAB.notes, F_NOTES, [], { tab: "#5c5c62" });
   t.exposure = ensureTable(ss, TAB.exposure, F_EXPOSURE, C_EXPOSURE, { tab: "#5c5c62" });
+  t.matches = ensureTable(ss, TAB.matches, F_MATCHES, C_MATCHES, { tab: BLUE, freezeCols: 3, filter: true });
+  t.apps = ensureTable(ss, TAB.apps, F_APPS, [], { tab: BLUE, freezeCols: 1, filter: true });
+  t.tokens = ensureTable(ss, TAB.tokens, F_TOKENS, C_TOKENS, { tab: "#5c5c62", freezeCols: 2 });
   t.audit = ensureTable(ss, TAB.audit, F_AUDIT, [], { tab: "#b8bdc6" });
-  const x = { sea: t.seasons.col, inj: t.injuries.col, pl: t.players.col, exp: t.exposure.col };
+  const x = { sea: t.seasons.col, inj: t.injuries.col, pl: t.players.col, exp: t.exposure.col, mat: t.matches.col, app: t.apps.col, tok: t.tokens.col };
 
   // Otomatik (gri) sütunlar: başlık hücresindeki tek bir ARRAYFORMULA tüm satırları hesaplar.
-  [[t.players, C_PLAYERS], [t.injuries, C_INJURIES], [t.exposure, C_EXPOSURE]].forEach((pair) => {
+  [[t.players, C_PLAYERS], [t.injuries, C_INJURIES], [t.exposure, C_EXPOSURE], [t.matches, C_MATCHES], [t.tokens, C_TOKENS]].forEach((pair) => {
     const tb = pair[0];
     pair[1].forEach((c) => {
       const col = tb.head.indexOf(c.h) + 1;
@@ -604,12 +808,29 @@ function buildTemplate() {
     SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${pl.col.active}2="Hayır"`)
       .setFontColor("#a1a1a8").setRanges([pl.sh.getRange(2, 1, rows(pl), pl.head.length)]).build(),
   ]);
+  const ap = t.apps, mt = t.matches, tk = t.tokens;
+  ap.sh.getRange(2, ap.head.indexOf("Oyuncu") + 1, rows(ap), 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInRange(pl.sh.getRange(`${pl.col.name}2:${pl.col.name}`), true).setAllowInvalid(true).build());
+  ap.sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=OR($${ap.col.status}2="${L.appStatus.injured}",$${ap.col.status}2="${L.appStatus.ill}")`)
+      .setBackground("#fde8e8").setRanges([ap.sh.getRange(2, 1, rows(ap), ap.span)]).build(),
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${ap.col.status}2="${L.appStatus.start}"`)
+      .setBackground("#eef3ff").setRanges([ap.sh.getRange(2, 1, rows(ap), ap.span)]).build(),
+  ]);
+  mt.sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=AND($${mt.col["Toparlanma (gün)"]}2<>"",$${mt.col["Toparlanma (gün)"]}2<=4)`)
+      .setBackground("#fff1dc").setRanges([mt.sh.getRange(2, mt.head.indexOf("Toparlanma (gün)") + 1, rows(mt), 1)]).build(),
+  ]);
+  tk.sh.setConditionalFormatRules([
+    SpreadsheetApp.newConditionalFormatRule().whenFormulaSatisfied(`=$${tk.col.active}2="Hayır"`)
+      .setFontColor("#a1a1a8").setStrikethrough(true).setRanges([tk.sh.getRange(2, 1, rows(tk), tk.head.length)]).build(),
+  ]);
 
   seedDefaults(t);
   buildPanel(ss, t);
 
   // Sıra, temizlik
-  [TAB.panel, TAB.injuries, TAB.players, TAB.notes, TAB.exposure, TAB.seasons, TAB.settings, TAB.audit].forEach((name, i) => {
+  [TAB.panel, TAB.injuries, TAB.players, TAB.matches, TAB.apps, TAB.notes, TAB.exposure, TAB.tokens, TAB.seasons, TAB.settings, TAB.audit].forEach((name, i) => {
     const sh = ss.getSheetByName(name);
     if (sh) { ss.setActiveSheet(sh); ss.moveActiveSheet(i + 1); }
   });
@@ -788,7 +1009,22 @@ function buildPanel(ss, t) {
   sh.getRange("J14:J60").setNumberFormat("0").setHorizontalAlignment("left");
   sh.getRange("H14:H60").setWrap(false);
 
-  sh.getRange(`B${s0 + 9}`).setValue("Bu sekme yalnızca formül içerir; veriler diğer sekmelerde. Tanımlar IOC 2020 ve futbol konsensüsüne göredir (maç maruziyeti = 11 oyuncu × 90 dk): insidans = zaman kaybettiren sakatlık / oyuncu-saat × 1000, yük = kayıp gün / oyuncu-saat × 1000.")
+  // Maç katılımı (sezon)
+  const k0 = s0 + 9, A = (k) => Q(TAB.apps, t.apps.col[k]), MT = (k) => Q(TAB.matches, t.matches.col[k]);
+  const aSeason = `${A("date")},">="&$L$2,${A("date")},"<="&$L$3`, mSeason = `${MT("date")},">="&$L$2,${MT("date")},"<="&$L$3,${MT("date")},"<="&TODAY()`;
+  section(sh, `B${k0}`, "Maç katılımı", `B${k0 + 1}:D${k0 + 1}`, ["Gösterge", "Sezon", ""]);
+  const mk = [
+    ["Oynanan maç", `=COUNTIFS(${mSeason})`, "0"],
+    ["Maç uygunluğu (sakat/hasta dışı)", `=IFERROR(1-(COUNTIFS(${A("status")},"${L.appStatus.injured}",${aSeason})+COUNTIFS(${A("status")},"${L.appStatus.ill}",${aSeason}))/COUNTIFS(${aSeason}),"")`, "0.0%"],
+    ["Sakatlıkla kaçırılan (oyuncu-maç)", `=COUNTIFS(${A("status")},"${L.appStatus.injured}",${aSeason})`, "0"],
+    ["Hastalıkla kaçırılan (oyuncu-maç)", `=COUNTIFS(${A("status")},"${L.appStatus.ill}",${aSeason})`, "0"],
+    ["≤4 gün toparlanmalı maç", `=COUNTIFS(${MT("Toparlanma (gün)")},"<=4",${mSeason})`, "0"],
+    ["Toplam maç dakikası", `=SUMIFS(${A("minutes")},${aSeason})`, "#,##0"],
+  ];
+  sh.getRange(`B${k0 + 2}:B${k0 + 1 + mk.length}`).setValues(mk.map((r) => [r[0]]));
+  mk.forEach((r, i) => sh.getRange(`C${k0 + 2 + i}`).setFormula(fx(r[1])).setNumberFormat(r[2]).setHorizontalAlignment("left"));
+
+  sh.getRange(`B${k0 + mk.length + 3}`).setValue("Bu sekme yalnızca formül içerir; veriler diğer sekmelerde. Tanımlar IOC 2020 ve FIFA futbol uzantısına (Waldén 2023) göredir: insidans = zaman kaybettiren sakatlık / oyuncu-saat × 1000, yük = kayıp gün / oyuncu-saat × 1000; maç maruziyeti maç kadrosundaki bireysel dakikalardan, maç uygunluğu Hägglund 2013'e göre.")
     .setFontSize(8).setFontColor(MUTED);
   sh.setFrozenRows(0);
 }
@@ -806,6 +1042,8 @@ function onEdit(e) {
     if (r2 < 2) return;
     if (name === TAB.players) fillPlayers(sh, r1, r2);
     else if (name === TAB.injuries) fillInjuries(sh, r1, r2, e.range.getColumn(), e.range.getLastColumn());
+    else if (name === TAB.tokens) fillTokens(sh, r1, r2);
+    else if (name === TAB.matches) fillMatches(sh, r1, r2);
   } catch (err) { /* elle düzenlemeyi asla engelleme */ }
 }
 /** Adı olan oyunculara eksik ID, kişisel kod ve Aktif=Evet verir. Kaç hücre doldurulduğunu döndürür. */
@@ -823,6 +1061,37 @@ function fillPlayers(sh, r1, r2) {
     if (!String(row[m.idx.id]).trim()) { sh.getRange(r, m.idx.id + 1).setValue("P" + pad(++n, 3)); done++; }
     if (m.idx.code >= 0 && !String(row[m.idx.code]).trim()) { const c = newCode(codes); codes[c] = 1; sh.getRange(r, m.idx.code + 1).setValue(c); done++; }
     if (m.idx.active >= 0 && row[m.idx.active] === "") { sh.getRange(r, m.idx.active + 1).setValue("Evet"); done++; }
+  }
+  return done;
+}
+/** QR Kodları: adı yazılan satıra ID, QR anahtarı, Aktif=Evet ve oluşturma tarihi verir. */
+function fillTokens(sh, r1, r2) {
+  const m = tableMeta(sh, F_TOKENS), last = sh.getLastRow();
+  if (m.idx.id < 0 || m.idx.name < 0 || last < 2) return 0;
+  const all = sh.getRange(2, 1, last - 1, m.span).getValues();
+  const existing = all.map((r) => ({ token: String(r[m.idx.token]).trim() }));
+  let n = maxNum(all.map((r) => String(r[m.idx.id]).trim()), "Q"), done = 0;
+  for (let r = r1; r <= Math.min(r2, last); r++) {
+    const row = all[r - 2];
+    if (!String(row[m.idx.name]).trim()) continue;
+    if (!String(row[m.idx.id]).trim()) { sh.getRange(r, m.idx.id + 1).setValue("Q" + pad(++n, 3)); done++; }
+    if (m.idx.token >= 0 && !String(row[m.idx.token]).trim()) { const t = newToken(existing); existing.push({ token: t }); sh.getRange(r, m.idx.token + 1).setValue(t); done++; }
+    if (m.idx.active >= 0 && row[m.idx.active] === "") { sh.getRange(r, m.idx.active + 1).setValue("Evet"); done++; }
+    if (m.idx.created >= 0 && row[m.idx.created] === "") { sh.getRange(r, m.idx.created + 1).setValue(new Date()); done++; }
+  }
+  return done;
+}
+/** Maçlar: tarihi ya da rakibi yazılan satıra ID ve 90 dk verir. */
+function fillMatches(sh, r1, r2) {
+  const m = tableMeta(sh, F_MATCHES), last = sh.getLastRow();
+  if (m.idx.id < 0 || last < 2) return 0;
+  const all = sh.getRange(2, 1, last - 1, m.span).getValues();
+  let n = maxNum(all.map((r) => String(r[m.idx.id]).trim()), "M"), done = 0;
+  for (let r = r1; r <= Math.min(r2, last); r++) {
+    const row = all[r - 2];
+    if (!String(row[m.idx.date]).trim() && !String(row[m.idx.opponent]).trim()) continue;
+    if (!String(row[m.idx.id]).trim()) { sh.getRange(r, m.idx.id + 1).setValue("M" + pad(++n, 3)); done++; }
+    if (m.idx.duration >= 0 && row[m.idx.duration] === "") { sh.getRange(r, m.idx.duration + 1).setValue(90); done++; }
   }
   return done;
 }
@@ -882,7 +1151,8 @@ function menuFill() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const a = fillPlayers(sheet(TAB.players), 2, sheet(TAB.players).getLastRow());
   const b = fillInjuries(sheet(TAB.injuries), 2, sheet(TAB.injuries).getLastRow());
-  ss.toast((a + b) ? (a + b) + " hücre dolduruldu." : "Eksik yok.", "Pitchside", 6);
+  const c = fillTokens(sheet(TAB.tokens), 2, sheet(TAB.tokens).getLastRow()) + fillMatches(sheet(TAB.matches), 2, sheet(TAB.matches).getLastRow());
+  ss.toast((a + b + c) ? (a + b + c) + " hücre dolduruldu." : "Eksik yok.", "Pitchside", 6);
 }
 function menuUrl() {
   const url = ScriptApp.getService().getUrl();

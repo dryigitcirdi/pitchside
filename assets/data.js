@@ -7,7 +7,7 @@
 
 const CONFIG = {
   // Paste the Apps Script /exec URL here to go live. Empty = demo mode (localStorage).
-  API_URL: "",
+  API_URL: "https://script.google.com/macros/s/AKfycbwgKg6ZuUlpBbYjXeBA8iJ9eLlxAJwcj4q3VfqXphwbgW3vvDe_V6QVFh5PYxrB5Gk7BA/exec",
   TEAM: "A Takım",
   STORE_KEY: "pitchside.v1",
   MATCH_PLAYERS: 11,
@@ -45,6 +45,23 @@ const SITUATIONS = {
   sprint: "Sprint / hızlanma", kick: "Şut / uzun pas", duel: "İkili mücadele", tackle: "Kayarak müdahale",
   jump: "Hava topu / iniş", cut: "Yön değiştirme", fall: "Düşme / çarpışma", other: "Diğer / bilinmiyor",
 };
+// Match-day context (FIFA 2023 football extension: individual match exposure + availability).
+const COMPETITIONS = { league: "Lig", cup: "Kupa", europe: "Avrupa", friendly: "Hazırlık", other: "Diğer" };
+const VENUES = { home: "İç saha", away: "Deplasman", neutral: "Tarafsız" };
+const SURFACES = { grass: "Doğal çim", hybrid: "Hibrit çim", artificial: "Sentetik" };
+// played → counts as appearance; missed → health reason (injury / illness) or other absence.
+const APP_STATUS = {
+  start: { label: "İlk 11", short: "İlk 11", played: true },
+  sub: { label: "Yedekten girdi", short: "Yedek", played: true },
+  unused: { label: "Kulübede kaldı", short: "Kulübe" },
+  coach: { label: "Teknik karar", short: "TK" },
+  injured: { label: "Sakat", short: "Sakat", missed: "injury" },
+  ill: { label: "Hasta", short: "Hasta", missed: "illness" },
+  suspended: { label: "Cezalı", short: "Ceza", missed: "other" },
+  national: { label: "Milli takım", short: "Milli", missed: "other" },
+  other: { label: "Diğer", short: "Diğer", missed: "other" },
+};
+const CONGESTION_DAYS = 4; // ≤4 days since the previous match = congested (Bengtsson et al., BJSM 2013)
 const RECURRENCE = { new: "Yeni", recurrent: "Tekrarlayan", subsequent: "Sonraki (farklı)" };
 const STAGES = [
   { id: "reported", label: "Bildirildi", short: "Bildirim", who: "Sporcu" },
@@ -57,6 +74,7 @@ const ROLES = {
   doctor: { label: "Takım Hekimi", name: "Dr. Yiğit Cırdı", initials: "YC" },
   physio: { label: "Fizyoterapist", name: "Fzt. Selin Aksoy", initials: "SA" },
   coach: { label: "Teknik Ekip", name: "Teknik Direktör", initials: "TD" },
+  reporter: { label: "QR bildirimi", name: "", initials: "" },
   athlete: { label: "Sporcu", name: "", initials: "" },
 };
 // coach: availability only — never diagnosis, notes or the athlete's own words (KVKK: health data is need-to-know).
@@ -65,7 +83,11 @@ const PERMS = {
   physio: { add: true, assess: true, diagnose: false, clear: false, exposure: false, remove: false, clinical: true, stages: ["acute", "rehab", "rtt"] },
   coach: { add: false, assess: false, diagnose: false, clear: false, exposure: false, remove: false, clinical: false, stages: [] },
   athlete: { add: false, assess: false, diagnose: false, clear: false, exposure: false, remove: false, clinical: false, stages: [] },
+  // QR holder: may only file a report on behalf of a player; reports stay "Bildirildi" until staff review.
+  reporter: { add: false, assess: false, diagnose: false, clear: false, exposure: false, remove: false, clinical: false, stages: [] },
 };
+// Who may edit match sheets (squad status + minutes).
+const MATCH_EDIT = { doctor: true, physio: true };
 
 // Positions → line + 4-3-3 slot (x across the pitch 0–100 from the left, y from own goal 0–100).
 const POSITIONS = {
@@ -163,7 +185,7 @@ const SEED_CLOSED = [
   [16, "2026-09-22", "ankle", "L", "ligament", "Lateral ayak bileği burkulması (grade I)", "contact", "game", "tackle", 6, "new", "sudden"],
 ];
 // active: [player, daysAgo, region, side, tissue, dx, mech, activity, situation, expectedDays, stage, recurrence, onset, pain, reportedBy, notes[]]
-const SEED_V = 1;
+const SEED_V = 3;
 const SEED_ACTIVE = [
   [9, 228, "knee", "R", "ligament", "ÖÇB rüptürü — ÖÇB rekonstrüksiyonu (BTB otogreft)", "noncontact", "game", "cut", 270, "rtt", "new", "sudden", 1, "physio",
     ["Op. sonrası 6. ay izokinetik: kuadriseps LSI %88, hamstring LSI %94.", "Saha içi rehab tamamlandı. Takım antrenmanı — temassız bölümler. Hop test bataryası haftaya."]],
@@ -183,12 +205,90 @@ const SEED_ATHLETE_NOTE = {
   11: ["İkili mücadelede ayağıma basıldı, ayak üstünde şişlik var, kramponu giyince ağrıyor.", "limited"],
 };
 
+// Deterministic PRNG so the demo season is identical on every device.
+const rng = (seed) => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+const OPPONENTS = ["Kuzeyspor", "Liman FK", "Boğaziçi SK", "Ege Gücü", "Karadeniz FK", "Başkent SK", "Toros Spor", "Marmara FK", "Kapadokya SK", "Fırat Spor", "Trakya FK", "Akdeniz SK", "Yayla Spor", "Dicle FK", "Göller SK", "Rumeli FK", "Çukurova Spor"];
+
+function buildMatches() {
+  const R = rng(7), out = [];
+  let n = 1;
+  for (const s of SEASONS) {
+    let wk = s.start, k = 0;
+    const end = s.end < todayISO ? s.end : todayISO;
+    while (wk <= end) {
+      const pre = k < 5, md = wk.slice(5), winter = md >= "12-22" || md <= "01-04";
+      const games = winter ? 0 : pre ? (k >= 2 ? 2 : 1) : (k % 3 === 1 ? 2 : 1);
+      const slots = games === 2 ? [2, 6] : [pre ? 5 : 6];
+      for (const off of slots) {
+        const date = addDays(wk, off);
+        if (date > todayISO || date > s.end) continue;
+        const comp = pre ? "friendly" : off === 2 ? (k % 2 ? "europe" : "cup") : "league";
+        const venue = n % 2 ? "home" : "away";
+        const gf = Math.floor(R() * 3.2), ga = Math.floor(R() * 2.4);
+        out.push({ id: `m${n++}`, date, opponent: OPPONENTS[Math.floor(R() * OPPONENTS.length)], comp, venue,
+          surface: venue === "away" && R() < 0.15 ? "artificial" : "grass", duration: 90, score: `${gf}-${ga}`, note: "" });
+      }
+      wk = addDays(wk, 7); k++;
+    }
+  }
+  return out;
+}
+
+// Squad sheets for every played match: injured/ill players first, then a 4-3-3 from the fit pool.
+function buildAppearances(players, matches, injuries) {
+  const R = rng(11), apps = [];
+  const slots = ["GK", "RB", "CB", "CB", "LB", "DM", "CM", "CM", "RW", "ST", "LW"];
+  const line = (pos) => POSITIONS[pos]?.line;
+  for (const m of matches) {
+    const fit = [], rows = {};
+    for (const p of players) {
+      const hurt = injuries.some((i) => i.playerId === p.id && i.timeLoss && i.stage !== "reported" &&
+        (i.activity === "game" ? m.date > i.date : m.date >= i.date) && m.date < (i.rtpDate || addDays(todayISO, 1)));
+      const r = R();
+      if (hurt) rows[p.id] = { status: "injured", minutes: 0 };
+      else if (r < 0.015) rows[p.id] = { status: "ill", minutes: 0 };
+      else if (r < 0.025 && m.comp !== "friendly") rows[p.id] = { status: "suspended", minutes: 0 };
+      else fit.push(p);
+    }
+    // First choice = order in the roster; ~20 % rotation per slot (more in friendlies / cups).
+    const rot = m.comp === "league" ? 0.18 : 0.45, used = new Set(), xi = [];
+    for (const pos of slots) {
+      let pool = fit.filter((p) => !used.has(p.id) && (p.pos === pos || (pos === "CM" && p.pos === "AM")));
+      if (!pool.length) pool = fit.filter((p) => !used.has(p.id) && line(p.pos) === line(pos));
+      if (!pool.length) pool = fit.filter((p) => !used.has(p.id) && p.pos !== "GK");
+      const rr = pos === "GK" ? (m.comp === "league" ? 0.03 : 0.3) : rot;
+      const pick = pool.length > 1 && R() < rr ? pool[pos === "GK" ? 1 : 1 + Math.floor(R() * (pool.length - 1))] : pool[0];
+      if (pick) { used.add(pick.id); xi.push(pick); rows[pick.id] = { status: "start", minutes: 90 }; }
+    }
+    const bench = fit.filter((p) => !used.has(p.id));
+    const benchGK = bench.filter((p) => p.pos === "GK").slice(0, 1), benchOut = bench.filter((p) => p.pos !== "GK");
+    const nSubs = Math.min(benchOut.length, 3 + Math.floor(R() * 3));
+    const outfieldXI = xi.filter((p) => p.pos !== "GK");
+    for (let k = 0; k < nSubs; k++) {
+      const sub = benchOut[k], off = outfieldXI[(k * 3 + Math.floor(R() * 3)) % outfieldXI.length];
+      const mins = 8 + Math.floor(R() * 32);
+      rows[sub.id] = { status: "sub", minutes: mins };
+      if (off && rows[off.id].minutes === 90) rows[off.id].minutes = 90 - mins;
+    }
+    // Matchday squad of 20: 11 starters + 9 on the bench (subs used + unused).
+    for (const p of [...benchGK, ...benchOut.slice(nSubs, Math.max(nSubs, 9 - benchGK.length))]) if (!rows[p.id]) rows[p.id] = { status: "unused", minutes: 0 };
+    for (const p of players) {
+      const x = rows[p.id] || { status: "coach", minutes: 0 };
+      apps.push({ matchId: m.id, playerId: p.id, status: x.status, minutes: x.minutes });
+    }
+  }
+  return apps;
+}
+
 function buildSeed() {
   const players = SEED_PLAYERS;
+  const matches = buildMatches();
+  // Match injuries happen on match days: snap to the nearest earlier fixture.
+  const snap = (date) => { const m = [...matches].reverse().find((x) => x.date <= date && diffDays(x.date, date) <= 6); return m ? m.date : date; };
   const injuries = [];
   let n = 1;
-  for (const [pi, date, region, side, tissue, dx, mech, act, sit, days, rec, onset] of SEED_CLOSED) {
-    const timeLoss = days > 0;
+  for (const [pi, d0, region, side, tissue, dx, mech, act, sit, days, rec, onset] of SEED_CLOSED) {
+    const timeLoss = days > 0, date = act === "game" ? snap(d0) : d0;
     injuries.push({
       id: `i${n++}`, playerId: `p${pi}`, date, region, side, tissue, diagnosis: dx, mechanism: mech, activity: act, situation: sit,
       onset, recurrence: rec, timeLoss, expectedDays: days, stage: "rtp", rtpDate: addDays(date, days),
@@ -198,25 +298,36 @@ function buildSeed() {
     });
   }
   for (const [pi, ago, region, side, tissue, dx, mech, act, sit, exp, stage, rec, onset, pain, by, notes] of SEED_ACTIVE) {
-    const date = addDays(todayISO, -ago);
-    const reported = stage === "reported";
-    const step = Math.max(1, Math.floor(ago / (notes.length + 1)));
+    const date = act === "game" && stage !== "reported" ? snap(addDays(todayISO, -ago)) : addDays(todayISO, -ago);
+    const reported = stage === "reported", span = Math.max(1, diffDays(date, todayISO));
+    const step = Math.max(1, Math.floor(span / (notes.length + 1)));
     injuries.push({
       id: `i${n++}`, playerId: `p${pi}`, date, region, side, tissue, diagnosis: dx, mechanism: mech, activity: act, situation: sit,
-      onset, recurrence: rec, timeLoss: stage !== "rtt" && !reported, expectedDays: exp, stage, rtpDate: null, pain,
+      onset, recurrence: rec, timeLoss: !reported, expectedDays: exp, stage, rtpDate: null, pain,
       reportedBy: by,
       assessed: reported ? null : { by: ROLES.physio.name, at: date },
       diagnosed: reported || stage === "acute" ? null : { by: ROLES.doctor.name, at: addDays(date, 1) },
       athleteNote: reported ? SEED_ATHLETE_NOTE[pi][0] : "",
       canPlay: reported ? SEED_ATHLETE_NOTE[pi][1] : null,
-      notes: notes.map((t, k) => ({ id: `n${n}-${k}`, at: addDays(date, Math.min(ago, 1 + k * step)), by: ROLES.physio.name, role: "physio", text: t })),
+      notes: notes.map((t, k) => ({ id: `n${n}-${k}`, at: addDays(date, Math.min(span, 1 + k * step)), by: ROLES.physio.name, role: "physio", text: t })),
     });
   }
-  return { v: SEED_V, players, injuries, exposure: buildExposure() };
+  const appearances = buildAppearances(players, matches, injuries);
+  // A player injured during a match was on the pitch for part of it.
+  for (const i of injuries) if (i.activity === "game") {
+    const m = matches.find((x) => x.date === i.date), a = m && appearances.find((x) => x.matchId === m.id && x.playerId === i.playerId);
+    if (a && !APP_STATUS[a.status].played) { a.status = "start"; a.minutes = 35 + (i.id.length * 7) % 50; }
+  }
+  const tokens = [
+    { id: "q1", name: "Ahmet Kaya", label: "Masör", token: "MSR7KX2PQ", active: true, expires: "", created: "2026-07-06", note: "" },
+    { id: "q2", name: "Burak Er", label: "Kondisyoner", token: "KND4WT9ZM", active: true, expires: "", created: "2026-07-06", note: "" },
+    { id: "q3", name: "Cem Su", label: "Performans analisti", token: "ANL2HR6YV", active: false, expires: "", created: "2026-08-01", note: "Sezon arası ayrıldı" },
+  ];
+  return { v: SEED_V, players, injuries, matches, appearances, tokens, exposure: buildExposure(matches) };
 }
 
-// Weekly team exposure, player-hours. Match exposure = 11 on the pitch × 90 min per match.
-function buildExposure() {
+// Weekly team training exposure, player-hours. Match exposure now comes from the match sheets (individual minutes).
+function buildExposure(matches = []) {
   const rows = [];
   for (const s of SEASONS) {
     let wk = s.start, k = 0;
@@ -225,7 +336,7 @@ function buildExposure() {
       const pre = k < 5, md = wk.slice(5);
       const winter = md >= "12-22" || md <= "01-04";
       const sessions = pre ? 10 : winter ? 3 : 5, hours = pre ? 1.5 : 1.25, players = 25;
-      const games = winter ? 0 : pre ? (k >= 2 ? 2 : 1) : (k % 3 === 1 ? 2 : 1);
+      const wkEnd = addDays(wk, 6), games = matches.filter((m) => m.date >= wk && m.date <= wkEnd).length;
       rows.push({ week: wk, sessions, hours, players, games });
       wk = addDays(wk, 7); k++;
     }
@@ -233,6 +344,7 @@ function buildExposure() {
   return rows;
 }
 const expoHours = (r) => ({ training: r.sessions * r.hours * r.players, game: r.games * CONFIG.MATCH_PLAYERS * (CONFIG.MATCH_MIN / 60) });
+const randomToken = (n = 9) => { const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789", b = new Uint32Array(n); crypto.getRandomValues(b); return [...b].map((x) => A[x % A.length]).join(""); };
 
 /* ─────────────────────────── Store ─────────────────────────── */
 const Store = {
@@ -246,7 +358,8 @@ const Store = {
     if (this.live) {
       const r = await api("getData", auth);
       if (r.status !== "ok") throw new Error(r.status);
-      this.db = r.data;
+      this.db = Object.assign({ matches: [], appearances: [], tokens: [], exposure: [] }, r.data);
+      if (r.sess) this.sess = r.sess;
       applyMeta(r.data);
     } else {
       try { this.db = JSON.parse(localStorage.getItem(CONFIG.STORE_KEY)); } catch { this.db = null; }
@@ -261,6 +374,8 @@ const Store = {
   player(id) { return this.db.players.find((p) => p.id === id) || { id, name: "Bilinmeyen oyuncu", no: "–", pos: "", age: null, height: null, active: false, code: "" }; },
   activePlayers() { return this.db.players.filter((p) => p.active !== false); },
   injury(id) { return this.db.injuries.find((i) => i.id === id); },
+  match(id) { return (this.db.matches || []).find((m) => m.id === id); },
+  appsFor(matchId) { return (this.db.appearances || []).filter((a) => a.matchId === matchId); },
 
   async saveInjury(inj, auth) {
     const exists = this.injury(inj.id);
@@ -282,6 +397,36 @@ const Store = {
     this.db.injuries = this.db.injuries.filter((i) => i.id !== id);
     this.persist(); this.emit();
     if (this.live) { const r = await api("removeInjury", auth, { id }); if (r.status !== "ok") { await this.load(auth); this.emit(); throw new Error(r.status); } }
+  },
+  // A match and its full squad sheet are saved together.
+  async saveMatch(match, apps, auth) {
+    this.db.matches = this.db.matches || []; this.db.appearances = this.db.appearances || [];
+    if (!match.id) match.id = "m" + Date.now().toString(36);
+    const ex = this.match(match.id);
+    if (ex) Object.assign(ex, match); else this.db.matches.push(match);
+    this.db.matches.sort((a, b) => a.date.localeCompare(b.date));
+    this.db.appearances = this.db.appearances.filter((a) => a.matchId !== match.id).concat(apps.map((a) => ({ ...a, matchId: match.id })));
+    this.persist(); this.emit();
+    if (this.live) {
+      const r = await api("saveMatch", auth, { match, appearances: apps });
+      if (r.status !== "ok") { await this.load(auth); this.emit(); throw new Error(r.status); }
+      if (r.id && r.id !== match.id) { await this.load(auth); this.emit(); }
+      return r.id || match.id;
+    }
+    return match.id;
+  },
+  async removeMatch(id, auth) {
+    this.db.matches = (this.db.matches || []).filter((m) => m.id !== id);
+    this.db.appearances = (this.db.appearances || []).filter((a) => a.matchId !== id);
+    this.persist(); this.emit();
+    if (this.live) { const r = await api("removeMatch", auth, { id }); if (r.status !== "ok") { await this.load(auth); this.emit(); throw new Error(r.status); } }
+  },
+  async saveToken(tok, auth) {
+    this.db.tokens = this.db.tokens || [];
+    const ex = tok.id && this.db.tokens.find((t) => t.id === tok.id);
+    if (ex) Object.assign(ex, tok); else { tok.id = tok.id || "q" + Date.now().toString(36); this.db.tokens.push(tok); }
+    this.persist(); this.emit();
+    if (this.live) { const r = await api("saveToken", auth, { tok }); await this.load(auth); this.emit(); if (r.status !== "ok") throw new Error(r.status); }
   },
   async saveExposure(row, auth) {
     const ex = this.db.exposure.find((r) => r.week === row.week);
@@ -320,7 +465,8 @@ const M = {
   active(inj) { return inj.stage !== "rtp"; },
   inRange(inj, r) { return !r || (inj.date >= r.start && inj.date <= r.end); },
   status(playerId, injuries) {
-    const act = injuries.filter((i) => i.playerId === playerId && M.active(i));
+    // Unreviewed QR reports never move availability; staff review turns them into a real record first.
+    const act = injuries.filter((i) => i.playerId === playerId && M.active(i) && !(i.stage === "reported" && i.reportedBy === "reporter"));
     if (act.some((i) => i.timeLoss && ["acute", "rehab"].includes(i.stage))) return "out";
     if (act.some((i) => i.stage === "reported" && i.canPlay === "no")) return "out";
     if (act.some((i) => !(i.stage === "reported" && i.canPlay === "yes"))) return "limited";
@@ -334,15 +480,79 @@ const M = {
     const e = r && endInj > r.end ? r.end : endInj;
     return Math.max(0, diffDays(s, e));
   },
-  exposure(rows, r) {
+  // Training: weekly team rows. Match: individual minutes from the match sheets; a match without a sheet
+  // falls back to 11 players × its duration; with no fixtures at all, to the weekly "games" estimate.
+  exposure(db, r) {
     let training = 0, game = 0;
-    for (const row of rows) if (!r || (row.week >= r.start && row.week <= r.end)) { const h = expoHours(row); training += h.training; game += h.game; }
+    const inR = (d) => !r || (d >= r.start && d <= r.end);
+    for (const row of db.exposure || []) if (inR(row.week)) training += expoHours(row).training;
+    const ms = (db.matches || []).filter((m) => m.date <= todayISO && inR(m.date));
+    if (ms.length) for (const m of ms) game += M.matchHours(db, m);
+    else for (const row of db.exposure || []) if (inR(row.week)) game += expoHours(row).game;
     return { training, game, total: training + game };
+  },
+  matchHours(db, m) {
+    const mins = (db.appearances || []).filter((a) => a.matchId === m.id).reduce((s, a) => s + (Number(a.minutes) || 0), 0);
+    return (mins || CONFIG.MATCH_PLAYERS * (m.duration || CONFIG.MATCH_MIN)) / 60;
+  },
+  matches(db, r) { return (db.matches || []).filter((m) => m.date <= todayISO && (!r || (m.date >= r.start && m.date <= r.end))).sort((a, b) => a.date.localeCompare(b.date)); },
+  // Days since the previous fixture (fixture congestion); null for a season's first match.
+  recovery(db) {
+    const out = {}, ms = [...(db.matches || [])].sort((a, b) => a.date.localeCompare(b.date));
+    ms.forEach((m, k) => { const prev = ms[k - 1]; out[m.id] = prev && diffDays(prev.date, m.date) <= 21 ? diffDays(prev.date, m.date) : null; });
+    return out;
+  },
+  // Team fixtures a player missed because of this injury (between onset and return to play).
+  missed(inj, db) {
+    if (!inj.timeLoss || inj.stage === "reported") return 0;
+    const end = inj.rtpDate || addDays(todayISO, 1);
+    return (db.matches || []).filter((m) => m.date <= todayISO && (inj.activity === "game" ? m.date > inj.date : m.date >= inj.date) && m.date < end).length;
+  },
+  // Season line for one player: appearances, minutes, matches missed (injury / illness / other).
+  playerStats(db, pid, r) {
+    const ms = M.matches(db, r), apps = db.appearances || [];
+    const o = { matches: ms.length, played: 0, starts: 0, subs: 0, minutes: 0, injury: 0, illness: 0, other: 0, unused: 0 };
+    for (const m of ms) {
+      const a = apps.find((x) => x.matchId === m.id && x.playerId === pid);
+      if (a) {
+        const st = APP_STATUS[a.status] || {};
+        if (st.played) { o.played++; o.minutes += Number(a.minutes) || 0; a.status === "start" ? o.starts++ : o.subs++; }
+        else if (st.missed) o[st.missed]++;
+        else o.unused++;
+      } else if (db.injuries.some((i) => i.playerId === pid && M.missed(i, { matches: [m] }))) o.injury++;
+    }
+    o.availability = o.matches ? 1 - (o.injury + o.illness) / o.matches : 1;
+    return o;
+  },
+  // Player match availability (Hägglund 2013): share of the squad not injured/ill, averaged over fixtures.
+  matchAvailability(db, r) {
+    const ms = M.matches(db, r), apps = db.appearances || [];
+    if (!ms.length) return { mean: 0, perMatch: [] };
+    const roster = db.players.filter((p) => p.active !== false).length || 1;
+    const perMatch = ms.map((m) => {
+      const a = apps.filter((x) => x.matchId === m.id);
+      const injured = a.length ? a.filter((x) => x.status === "injured").length : db.players.filter((p) => db.injuries.some((i) => i.playerId === p.id && M.missed(i, { matches: [m] }))).length;
+      const ill = a.filter((x) => x.status === "ill").length, squad = a.length || roster;
+      return { m, injured, ill, squad, avail: 1 - (injured + ill) / squad };
+    });
+    return { mean: perMatch.reduce((s, x) => s + x.avail, 0) / perMatch.length, perMatch };
+  },
+  // Match-injury incidence after short (≤4 d) vs long (≥6 d) recovery.
+  congestion(db, r) {
+    const rec = M.recovery(db), ms = M.matches(db, r), out = { short: { n: 0, h: 0, m: 0 }, long: { n: 0, h: 0, m: 0 } };
+    for (const m of ms) {
+      const d = rec[m.id]; if (d === null || d === undefined || d === 5) continue;
+      const g = d <= CONGESTION_DAYS ? out.short : out.long;
+      g.m++; g.h += M.matchHours(db, m);
+      g.n += db.injuries.filter((i) => i.timeLoss && i.stage !== "reported" && i.activity === "game" && i.date === m.date).length;
+    }
+    for (const g of [out.short, out.long]) g.inc = g.h ? (g.n / g.h) * 1000 : 0;
+    return out;
   },
   summary(db, range) {
     const inj = db.injuries.filter((i) => M.inRange(i, range) && i.stage !== "reported");
     const tl = inj.filter((i) => i.timeLoss);
-    const ex = M.exposure(db.exposure, range);
+    const ex = M.exposure(db, range);
     const daysLost = db.injuries.reduce((s, i) => s + M.daysIn(i, range), 0);
     const per = (n, h) => (h ? (n / h) * 1000 : 0);
     const roster = db.players.filter((p) => p.active !== false);
@@ -360,6 +570,10 @@ const M = {
       pending: db.injuries.filter((i) => i.stage === "reported" || (!i.diagnosed && M.active(i))).length,
       active: db.injuries.filter(M.active).length,
       recurrent: inj.filter((i) => i.recurrence === "recurrent").length,
+      severe: per(tl.filter((i) => M.days(i) > 28).length, ex.total),
+      matches: M.matches(db, range).length,
+      matchAvail: M.matchAvailability(db, range).mean,
+      missed: tl.reduce((s2, i) => s2 + M.missed(i, db), 0),
     };
   },
   // Time-loss muscle injuries by group (hamstring / adductor / quadriceps / calf).
